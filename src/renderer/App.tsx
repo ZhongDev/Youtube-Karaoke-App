@@ -96,11 +96,8 @@ export default function App() {
 
       <div className="content">
         <main className="stage">
-          {playerError ? (
-            <div className="player-error">{playerError}</div>
-          ) : (
-            <div className="player-mount" ref={mountRef} />
-          )}
+          <div className="player-mount" ref={mountRef} />
+          {playerError && <div className="player-error">{playerError}</div>}
           <div className="lyrics-placeholder">Lyrics overlay — Phase 1</div>
         </main>
 

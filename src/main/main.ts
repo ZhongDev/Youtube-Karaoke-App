@@ -3,16 +3,13 @@ import path from 'node:path';
 import started from 'electron-squirrel-startup';
 import { getDbPath, openDatabase } from './db';
 import { registerIpcHandlers } from './ipc';
-import { APP_HOST, APP_SCHEME, registerAppScheme, serveRenderer } from './protocol';
+import { startRendererServer } from './server';
 
 if (started) {
   app.quit();
 }
 
-// Must happen before app ready.
-registerAppScheme();
-
-const createWindow = () => {
+const createWindow = (rendererUrl: string) => {
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -27,28 +24,26 @@ const createWindow = () => {
     },
   });
 
+  mainWindow.loadURL(rendererUrl);
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
     mainWindow.webContents.openDevTools({ mode: 'detach' });
-  } else {
-    mainWindow.loadURL(`${APP_SCHEME}://${APP_HOST}/`);
   }
 };
 
-app.whenReady().then(() => {
-  if (!MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    serveRenderer(MAIN_WINDOW_VITE_NAME);
-  }
+app.whenReady().then(async () => {
+  const rendererUrl =
+    MAIN_WINDOW_VITE_DEV_SERVER_URL ||
+    (await startRendererServer(MAIN_WINDOW_VITE_NAME));
 
   const dbPath = getDbPath();
   const db = openDatabase(dbPath);
   registerIpcHandlers(db, dbPath);
 
-  createWindow();
+  createWindow(rendererUrl);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      createWindow(rendererUrl);
     }
   });
 });

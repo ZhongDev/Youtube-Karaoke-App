@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 import { MakerZIP } from '@electron-forge/maker-zip';
@@ -8,11 +10,43 @@ import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-nati
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
+// Vite bundles all JS, so the Vite plugin packages the app without node_modules.
+// Native modules (better-sqlite3) stay external and must be copied in by hand,
+// along with their runtime dependency closure.
+const EXTERNAL_NATIVE_PACKAGES = ['better-sqlite3'];
+
+function collectProdDeps(name: string, fromDir: string, out: Map<string, string>): void {
+  if (out.has(name)) return;
+  const pkgJsonPath = require.resolve(`${name}/package.json`, { paths: [fromDir] });
+  const pkgDir = path.dirname(pkgJsonPath);
+  out.set(name, pkgDir);
+  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8')) as {
+    dependencies?: Record<string, string>;
+  };
+  for (const dep of Object.keys(pkg.dependencies ?? {})) {
+    collectProdDeps(dep, pkgDir, out);
+  }
+}
+
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
   },
   rebuildConfig: {},
+  hooks: {
+    packageAfterPrune: async (_forgeConfig, buildPath) => {
+      const deps = new Map<string, string>();
+      for (const name of EXTERNAL_NATIVE_PACKAGES) {
+        collectProdDeps(name, __dirname, deps);
+      }
+      for (const [name, srcDir] of deps) {
+        await fs.promises.cp(srcDir, path.join(buildPath, 'node_modules', name), {
+          recursive: true,
+          dereference: true,
+        });
+      }
+    },
+  },
   makers: [
     new MakerSquirrel({}),
     new MakerZIP({}, ['darwin']),
