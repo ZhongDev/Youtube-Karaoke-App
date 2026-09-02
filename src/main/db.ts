@@ -45,6 +45,9 @@ const MIGRATIONS: string[] = [
     value TEXT
   );
   `,
+  // v2 — provider-reported track duration per lyrics row, for drift warnings
+  // (SPEC.md §8: |videoDuration − lyricDuration| > 3s ⇒ warn).
+  `ALTER TABLE lyrics ADD COLUMN provider_duration_s INTEGER;`,
 ];
 
 export function getDbPath(): string {

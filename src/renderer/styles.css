@@ -22,7 +22,8 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans',
+    'Apple SD Gothic Neo', sans-serif;
   font-size: 15px;
   -webkit-font-smoothing: antialiased;
   user-select: none;
@@ -34,11 +35,13 @@ body {
   height: 100%;
 }
 
+/* ── top bar ─────────────────────────────────────────────── */
+
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 16px;
+  gap: 14px;
+  padding: 8px 14px;
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
 }
@@ -46,12 +49,79 @@ body {
 .brand {
   font-weight: 700;
   letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.url-bar {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+}
+
+.url-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+
+.url-input:focus {
+  border-color: var(--accent);
+}
+
+.url-load {
+  padding: 7px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.url-load:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
+
+.badge {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+}
+
+.mode-toggle {
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.mode-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── stage ───────────────────────────────────────────────── */
 
 .content {
   display: flex;
@@ -59,10 +129,18 @@ body {
   min-height: 0;
 }
 
+.stage-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 .stage {
   position: relative;
   flex: 1;
-  min-width: 0;
+  min-height: 0;
   background: #000;
   display: flex;
   align-items: stretch;
@@ -79,6 +157,12 @@ body {
   display: block;
 }
 
+.empty-hint {
+  margin: auto;
+  color: var(--text-dim);
+  font-size: 18px;
+}
+
 .player-error {
   position: absolute;
   top: 50%;
@@ -91,42 +175,141 @@ body {
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 10px;
+  z-index: 3;
 }
 
-.lyrics-placeholder {
+/* ── lyrics ──────────────────────────────────────────────── */
+
+.lyrics-layer.overlay {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 28px 0 36px;
+  padding: 40px 24px 30px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.82));
+  pointer-events: none;
+  z-index: 2;
+}
+
+.lyrics-layer.panel {
+  padding: 14px 24px;
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border);
+  max-height: 34%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.lyrics-synced {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.lyric-line {
+  transition:
+    opacity 0.22s ease,
+    font-size 0.22s ease,
+    transform 0.22s ease;
+  line-height: 1.35;
+  min-height: 1.35em;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+  white-space: pre-wrap;
+}
+
+.lyric-line.current {
+  font-size: 36px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.lyric-line.prev,
+.lyric-line.next {
+  font-size: 19px;
+  opacity: 0.5;
+  color: var(--text);
+}
+
+.word {
+  transition: color 0.12s ease;
+}
+
+.word.sung {
+  color: var(--accent);
+}
+
+.lyrics-note {
   text-align: center;
   color: var(--text-dim);
-  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
-  pointer-events: none;
-  font-size: 20px;
+  font-size: 16px;
+  padding: 10px 0;
 }
 
-.sidebar {
-  width: 260px;
-  padding: 16px;
-  background: var(--bg-raised);
-  border-left: 1px solid var(--border);
+.lyrics-plain {
+  pointer-events: auto;
+  max-height: 240px;
   overflow-y: auto;
+  background: rgba(10, 12, 16, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 18px;
+  max-width: 640px;
+  margin: 0 auto;
 }
 
-.sidebar h2 {
-  margin: 0 0 8px;
-  font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
+.lyrics-layer.panel .lyrics-plain {
+  max-height: 100%;
 }
+
+.unsynced-tag {
+  display: inline-block;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-bottom: 6px;
+}
+
+.lyrics-plain pre {
+  margin: 0;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+/* ── toast ───────────────────────────────────────────────── */
+
+.toast {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 17, 21, 0.92);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 8px 18px;
+  border-radius: 999px;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  z-index: 4;
+  pointer-events: none;
+}
+
+/* ── status bar ──────────────────────────────────────────── */
 
 .statusbar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 6px 16px;
+  gap: 14px;
+  padding: 6px 14px;
   background: var(--bg-raised);
   border-top: 1px solid var(--border);
   font-size: 12px;
@@ -137,6 +320,23 @@ body {
 .time-readout {
   color: var(--accent);
   font-variant-numeric: tabular-nums;
+}
+
+.offset-chip,
+.state-chip {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.warning-chip {
+  color: #ffb04d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 46%;
+}
+
+.spacer {
+  flex: 1;
 }
 
 .muted {
