@@ -41,7 +41,7 @@ const QUOTE_RES = [
 ] as const;
 
 function normalizeTitle(raw: string): string {
-  return raw.normalize('NFKC').replace(/[ 　]/g, ' ');
+  return raw.normalize('NFKC').replace(/[ \u00A0\u3000]/g, ' '); // NBSP + ideographic space
 }
 
 function stripNoiseBrackets(s: string): string {
