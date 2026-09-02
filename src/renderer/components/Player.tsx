@@ -1,6 +1,13 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type RefObject } from 'react';
 import type { SyncClock } from '../../shared/syncClock';
 import { loadYouTubeApi } from '../youtube';
+
+/** Imperative controls exposed to the parent via `handleRef`. */
+export interface PlayerHandle {
+  play(): void;
+  pause(): void;
+  toggle(): void;
+}
 
 export interface PlayerCallbacks {
   onReady(durationS: number): void;
@@ -14,6 +21,9 @@ export interface PlayerCallbacks {
 interface PlayerProps extends PlayerCallbacks {
   videoId: string;
   clock: SyncClock;
+  /** false = cue only (e.g. queue restored at launch); user starts it. */
+  autoplay: boolean;
+  handleRef: RefObject<PlayerHandle | null>;
 }
 
 const STATE_NAMES: Record<number, string> = {
@@ -36,7 +46,7 @@ export default function Player(props: PlayerProps) {
     const mount = mountRef.current;
     if (!mount) return;
 
-    const { videoId, clock } = propsRef.current;
+    const { videoId, clock, autoplay, handleRef } = propsRef.current;
     let cancelled = false;
     let player: YT.Player | null = null;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -65,7 +75,7 @@ export default function Player(props: PlayerProps) {
           videoId,
           width: '100%',
           height: '100%',
-          playerVars: { autoplay: 1, playsinline: 1, rel: 0 },
+          playerVars: { autoplay: autoplay ? 1 : 0, playsinline: 1, rel: 0 },
           events: {
             onReady: (e) => {
               propsRef.current.onReady(e.target.getDuration());
@@ -86,6 +96,15 @@ export default function Player(props: PlayerProps) {
             },
           },
         });
+        handleRef.current = {
+          play: () => player?.playVideo(),
+          pause: () => player?.pauseVideo(),
+          toggle: () => {
+            if (!player) return;
+            if (player.getPlayerState() === 1) player.pauseVideo();
+            else player.playVideo();
+          },
+        };
       })
       .catch(() => {
         if (!cancelled) propsRef.current.onError(-1);
@@ -93,6 +112,7 @@ export default function Player(props: PlayerProps) {
 
     return () => {
       cancelled = true;
+      handleRef.current = null;
       if (pollTimer) clearInterval(pollTimer);
       player?.destroy();
       player = null;

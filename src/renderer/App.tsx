@@ -1,18 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AppInfo, ResolveResult } from '../shared/ipc';
+import type { AppInfo, QueueAddMode, ResolveResult } from '../shared/ipc';
 import { parseLrc } from '../shared/lrc';
 import { SyncClock } from '../shared/syncClock';
-import { extractVideoId } from '../shared/youtubeUrl';
 import LyricsDisplay, { type LyricsStatus } from './components/LyricsDisplay';
-import Player from './components/Player';
+import Player, { type PlayerHandle } from './components/Player';
+import QueuePanel from './components/QueuePanel';
 import UrlBar from './components/UrlBar';
+import { useQueue } from './useQueue';
 import { formatTime } from './youtube';
+
+/** Unplayable video (embed-blocked, removed, …) → move on after this long. */
+const AUTO_SKIP_MS = 5000;
 
 export default function App() {
   const clockRef = useRef(new SyncClock());
+  const playerRef = useRef<PlayerHandle | null>(null);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
 
-  const [videoId, setVideoId] = useState<string | null>(null);
+  // The queue's head is what's playing. The Player is keyed by the queue
+  // item id (not the video id) so the same song queued twice still remounts.
+  const queue = useQueue();
+  const { advance: queueAdvance, add: queueAdd } = queue; // stable identities
+  const current = queue.items[0] ?? null;
+  const currentId = current?.id ?? null;
+  const videoId = current?.videoId ?? null;
+  const currentIdRef = useRef(currentId);
+  currentIdRef.current = currentId;
+
+  // The item restored from disk at launch is cued, not autoplayed; every
+  // later head change (add, skip, song ended) is user-driven → autoplay.
+  const initialIdRef = useRef<number | null | undefined>(undefined);
+  if (queue.loaded && initialIdRef.current === undefined) initialIdRef.current = currentId;
+  const autoplay = queue.loaded && currentId !== initialIdRef.current;
+
   const [result, setResult] = useState<ResolveResult | null>(null);
   const [lyricsStatus, setLyricsStatus] = useState<LyricsStatus>('idle');
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -25,58 +45,101 @@ export default function App() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [displayMode, setDisplayMode] = useState<'overlay' | 'panel'>('overlay');
+  const [queueOpen, setQueueOpen] = useState(true);
   const [playerState, setPlayerState] = useState('idle');
   const [timeS, setTimeS] = useState(0);
   const [durationS, setDurationS] = useState(0);
+
+  const resolvedWithDurRef = useRef(false);
+  const endedRef = useRef(false);
+  const skipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     window.karaoke.getAppInfo().then(setAppInfo).catch(console.error);
   }, []);
 
-  const resolve = useCallback((id: string, duration?: number) => {
+  const resolve = useCallback((id: string, itemId: number, duration?: number) => {
     window.karaoke
       .resolveVideo(id, duration)
       .then((r) => {
-        if (r.track.videoId !== id) return;
+        if (currentIdRef.current !== itemId) return; // head changed meanwhile
         setResult(r);
         setOffsetMs(r.offsetMs);
         setLyricsStatus('done');
       })
       .catch((err: unknown) => {
+        if (currentIdRef.current !== itemId) return;
         setLyricsStatus('error');
         setLoadError(err instanceof Error ? err.message : String(err));
       });
   }, []);
 
-  const loadVideo = useCallback(
-    (input: string) => {
-      const id = extractVideoId(input);
-      if (!id) {
-        setLoadError('That does not look like a YouTube URL or video id.');
+  // Per-song reset whenever the queue head changes.
+  useEffect(() => {
+    clockRef.current.reset();
+    setResult(null);
+    setLoadError(null);
+    setPlayerError(null);
+    setPlayerState(videoId ? 'loading' : 'idle');
+    setTimeS(0);
+    setDurationS(0);
+    setOffsetMs(0);
+    resolvedWithDurRef.current = false;
+    endedRef.current = false;
+    if (skipTimer.current) {
+      clearTimeout(skipTimer.current);
+      skipTimer.current = null;
+    }
+    if (currentId === null || !videoId) {
+      setLyricsStatus('idle');
+      return;
+    }
+    setLyricsStatus('fetching');
+    // Usually a cache hit thanks to the queue prefetch; never blocks playback.
+    resolve(videoId, currentId);
+  }, [currentId, videoId, resolve]);
+
+  const advance = useCallback(() => {
+    queueAdvance().catch(console.error);
+  }, [queueAdvance]);
+
+  const failPlayback = useCallback(
+    (message: string, autoSkip: boolean) => {
+      if (!autoSkip) {
+        setPlayerError(message);
         return;
       }
-      clockRef.current.reset();
-      setVideoId(id);
-      setResult(null);
-      setLoadError(null);
-      setPlayerError(null);
-      setLyricsStatus('fetching');
-      setPlayerState('loading');
-      setTimeS(0);
-      setDurationS(0);
-      setOffsetMs(0);
-      // Lyrics resolve in parallel — playback is never blocked on them.
-      resolve(id);
+      setPlayerError(`${message} Skipping in ${AUTO_SKIP_MS / 1000}s…`);
+      if (skipTimer.current) clearTimeout(skipTimer.current);
+      skipTimer.current = setTimeout(advance, AUTO_SKIP_MS);
     },
-    [resolve],
+    [advance],
   );
 
-  // Offset HUD hotkeys: [ / ] nudge ∓100ms, Shift ∓500ms, \ resets.
+  const addToQueue = useCallback(
+    (input: string, mode: QueueAddMode) => {
+      setLoadError(null);
+      queueAdd(input, mode).catch((err: unknown) => {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      });
+    },
+    [queueAdd],
+  );
+
+  // Hotkeys: Space play/pause; [ / ] nudge offset ∓100ms, Shift ∓500ms, \ resets.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!videoId) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+
+      if (e.key === ' ') {
+        if (playerRef.current) {
+          e.preventDefault();
+          playerRef.current.toggle();
+        }
+        return;
+      }
+      if (!videoId) return;
 
       let next: number | null = null;
       const cur = offsetMsRef.current;
@@ -124,8 +187,15 @@ export default function App() {
     return `${label} · ${doc.source}${result?.fromCache ? ' · cached' : ''}`;
   })();
 
-  const lyricsBlock = videoId && !playerError && (
+  const nowPlayingLabel = current
+    ? current.track && current.artist
+      ? `${current.artist} — ${current.track}`
+      : current.title || current.videoId
+    : '';
+
+  const lyricsBlock = current && videoId && !playerError && (
     <LyricsDisplay
+      key={current.id}
       status={lyricsStatus}
       doc={result?.lyrics ?? null}
       parsed={parsed}
@@ -138,7 +208,7 @@ export default function App() {
     <div className="shell">
       <header className="topbar">
         <span className="brand">YouTube Karaoke</span>
-        <UrlBar onLoad={loadVideo} />
+        <UrlBar onAdd={addToQueue} />
         <span className="topbar-status">
           {badge && <span className="badge">{badge}</span>}
           <button
@@ -147,6 +217,13 @@ export default function App() {
             onClick={() => setDisplayMode((m) => (m === 'overlay' ? 'panel' : 'overlay'))}
           >
             {displayMode === 'overlay' ? '▭ overlay' : '▤ panel'}
+          </button>
+          <button
+            className={`mode-toggle ${queueOpen ? 'active' : ''}`}
+            title="Toggle queue sidebar"
+            onClick={() => setQueueOpen((o) => !o)}
+          >
+            ☰ queue{queue.items.length ? ` · ${queue.items.length}` : ''}
           </button>
           <span className="time-readout">
             {formatTime(timeS)} / {formatTime(durationS)}
@@ -157,41 +234,75 @@ export default function App() {
       <div className="content">
         <main className="stage-column">
           <div className="stage">
-            {videoId ? (
+            {current && videoId ? (
               <Player
-                key={videoId}
+                key={current.id}
                 videoId={videoId}
+                autoplay={autoplay}
                 clock={clockRef.current}
+                handleRef={playerRef}
                 onReady={(dur) => {
                   setDurationS(dur);
-                  // Re-resolve with duration: tightens matching, stores it.
-                  resolve(videoId, dur);
+                  if (dur > 0 && !resolvedWithDurRef.current) {
+                    resolvedWithDurRef.current = true;
+                    // Re-resolve with duration: tightens matching, stores it.
+                    resolve(videoId, current.id, dur);
+                  }
                 }}
-                onStateChange={(name) => setPlayerState(name)}
+                onStateChange={(name) => {
+                  setPlayerState(name);
+                  // Auto-advance exactly once per item (SPEC.md §7).
+                  if (name === 'ended' && !endedRef.current) {
+                    endedRef.current = true;
+                    advance();
+                  }
+                }}
                 onTick={(t, dur) => {
                   setTimeS(t);
-                  if (dur) setDurationS(dur);
+                  if (dur > 0) {
+                    setDurationS(dur);
+                    // A cued (not autoplayed) video reports 0 duration at
+                    // ready; pick it up once metadata is in.
+                    if (!resolvedWithDurRef.current) {
+                      resolvedWithDurRef.current = true;
+                      resolve(videoId, current.id, dur);
+                    }
+                  }
                 }}
                 onEmbedBlocked={() => {
-                  setPlayerError(
-                    'This upload blocks embedding — try another upload of this song (e.g. the "Artist - Topic" one).',
-                  );
                   window.karaoke.markEmbedBlocked(videoId).catch(console.error);
+                  failPlayback(
+                    'This upload blocks embedding — try another upload of this song (e.g. the "Artist - Topic" one).',
+                    true,
+                  );
                 }}
                 onError={(code) =>
-                  setPlayerError(
+                  failPlayback(
                     code === -1
                       ? 'Could not load the YouTube player (offline?).'
-                      : `Player error ${code}`,
+                      : `YouTube player error ${code} — video unavailable.`,
+                    // Never auto-drain the queue on a network failure.
+                    code !== -1,
                   )
                 }
               />
             ) : (
               <div className="empty-hint">
-                Paste a YouTube URL above to start singing.
+                {queue.loaded
+                  ? 'Queue is empty — paste a YouTube URL above to add a song.'
+                  : ''}
               </div>
             )}
-            {playerError && <div className="player-error">{playerError}</div>}
+            {playerError && (
+              <div className="player-error">
+                <div>{playerError}</div>
+                {queue.items.length > 0 && (
+                  <button className="url-load" onClick={advance}>
+                    Skip now ⏭
+                  </button>
+                )}
+              </div>
+            )}
             {displayMode === 'overlay' && (
               <div className="lyrics-layer overlay">{lyricsBlock}</div>
             )}
@@ -201,6 +312,19 @@ export default function App() {
             <div className="lyrics-layer panel">{lyricsBlock}</div>
           )}
         </main>
+
+        {queueOpen && (
+          <QueuePanel
+            items={queue.items}
+            playerState={playerState}
+            onPlay={(id) => queue.play(id).catch(console.error)}
+            onTogglePlay={() => playerRef.current?.toggle()}
+            onRemove={(id) => queue.remove(id).catch(console.error)}
+            onMove={(id, to) => queue.move(id, to).catch(console.error)}
+            onAdvance={advance}
+            onClear={() => queue.clear().catch(console.error)}
+          />
+        )}
       </div>
 
       <footer className="statusbar">
@@ -210,6 +334,7 @@ export default function App() {
           {offsetMs} ms
         </span>
         <span className="state-chip">{playerState}</span>
+        {nowPlayingLabel && <span className="now-playing-chip">▶ {nowPlayingLabel}</span>}
         {result?.warning && <span className="warning-chip">⚠ {result.warning}</span>}
         {loadError && <span className="warning-chip">⚠ {loadError}</span>}
         <span className="muted spacer" />

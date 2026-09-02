@@ -20,6 +20,20 @@ interface LyricsRow {
   provider_duration_s: number | null;
 }
 
+/** One queue row joined with its track and best lyrics kind (null = none). */
+export interface QueueRow {
+  id: number;
+  video_id: string;
+  title: string | null;
+  channel: string | null;
+  artist: string | null;
+  track: string | null;
+  duration_s: number | null;
+  is_topic: number | null;
+  embeddable: number | null;
+  best_kind: LyricsKind | null;
+}
+
 const KIND_RANK: Record<LyricsKind, number> = {
   synced_word: 3,
   synced_line: 2,
@@ -159,5 +173,58 @@ export class Repo {
          ON CONFLICT(video_id) DO UPDATE SET offset_ms = excluded.offset_ms`,
       )
       .run(videoId, Math.round(offsetMs));
+  }
+
+  // ── queue ──────────────────────────────────────────────────
+
+  listQueue(): QueueRow[] {
+    return this.db
+      .prepare(
+        `SELECT q.id, q.video_id, t.title, t.channel, t.artist, t.track,
+                t.duration_s, t.is_topic, t.embeddable,
+                (SELECT l.kind FROM lyrics l WHERE l.video_id = q.video_id
+                 ORDER BY CASE l.kind WHEN 'synced_word' THEN 3
+                                      WHEN 'synced_line' THEN 2 ELSE 1 END DESC
+                 LIMIT 1) AS best_kind
+         FROM queue q LEFT JOIN tracks t ON t.video_id = q.video_id
+         ORDER BY q.position`,
+      )
+      .all() as QueueRow[];
+  }
+
+  queueIds(): number[] {
+    return (
+      this.db.prepare('SELECT id FROM queue ORDER BY position').all() as { id: number }[]
+    ).map((r) => r.id);
+  }
+
+  /** Insert at `index` (0..n), shifting later rows down. Returns the new id. */
+  insertQueueItem(videoId: string, index: number): number {
+    return this.db.transaction(() => {
+      this.db.prepare('UPDATE queue SET position = position + 1 WHERE position >= ?').run(index);
+      const r = this.db
+        .prepare('INSERT INTO queue (position, video_id) VALUES (?, ?)')
+        .run(index, videoId);
+      return Number(r.lastInsertRowid);
+    })();
+  }
+
+  deleteQueueItem(id: number): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM queue WHERE id = ?').run(id);
+      this.setQueueOrder(this.queueIds());
+    })();
+  }
+
+  /** Rewrite positions to match `ids` (dense 0..n-1). */
+  setQueueOrder(ids: number[]): void {
+    const stmt = this.db.prepare('UPDATE queue SET position = ? WHERE id = ?');
+    this.db.transaction(() => {
+      ids.forEach((id, i) => stmt.run(i, id));
+    })();
+  }
+
+  clearQueue(): void {
+    this.db.prepare('DELETE FROM queue').run();
   }
 }

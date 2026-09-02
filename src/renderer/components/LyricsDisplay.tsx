@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useState, type RefObject } from 'react';
 import type { LyricsDoc } from '../../shared/ipc';
 import { lineIndexAt, type ParsedLrc } from '../../shared/lrc';
 import type { SyncClock } from '../../shared/syncClock';
@@ -79,15 +79,17 @@ function SyncedLyrics({
   }, [parsed, clock, offsetMsRef]);
 
   const { lines } = parsed;
+  // `lineIdx` is state and can lag one render behind a `parsed` change (the
+  // rAF loop re-evaluates on the next frame), so never trust it blindly.
   const current = lineIdx >= 0 ? lines[lineIdx] : undefined;
   const window: Array<{ key: number; role: string; text: string }> = [];
-  if (lineIdx >= 0) {
-    if (lineIdx > 0) {
-      window.push({ key: lineIdx - 1, role: 'prev', text: lines[lineIdx - 1]!.text });
-    }
-    window.push({ key: lineIdx, role: 'current', text: current!.text });
+  if (current) {
+    const prev = lines[lineIdx - 1];
+    if (prev) window.push({ key: lineIdx - 1, role: 'prev', text: prev.text });
+    window.push({ key: lineIdx, role: 'current', text: current.text });
     for (const i of [lineIdx + 1, lineIdx + 2]) {
-      if (i < lines.length) window.push({ key: i, role: 'next', text: lines[i]!.text });
+      const l = lines[i];
+      if (l) window.push({ key: i, role: 'next', text: l.text });
     }
   } else {
     // Before the first timestamp: preview the opening lines.

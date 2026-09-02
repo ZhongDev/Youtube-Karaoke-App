@@ -48,6 +48,17 @@ const MIGRATIONS: string[] = [
   // v2 — provider-reported track duration per lyrics row, for drift warnings
   // (SPEC.md §8: |videoDuration − lyricDuration| > 3s ⇒ warn).
   `ALTER TABLE lyrics ADD COLUMN provider_duration_s INTEGER;`,
+  // v3 — queue rows get a stable id so they can be reordered/removed and the
+  // same video can be queued twice. (v1's queue table was never written to.)
+  `
+  DROP TABLE queue;
+  CREATE TABLE queue (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    position INTEGER NOT NULL,   -- dense 0..n-1, 0 = now playing
+    video_id TEXT NOT NULL
+  );
+  CREATE INDEX queue_position ON queue(position);
+  `,
 ];
 
 export function getDbPath(): string {
