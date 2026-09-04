@@ -2,11 +2,15 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import type Database from 'better-sqlite3';
 import {
   IPC,
+  LYRICS_MODES,
   PROVIDER_IDS,
+  RUBY_MODES,
   type AppInfo,
+  type LyricsMode,
   type QueueAddMode,
   type QueueSnapshot,
   type ResolveResult,
+  type RubyMode,
   type Settings,
   type SettingsPatch,
 } from '../shared/ipc';
@@ -56,6 +60,16 @@ function sanitizeSettingsPatch(raw: unknown): SettingsPatch {
       patch.ollama.endpoint = o['endpoint'];
     }
     if (typeof o['model'] === 'string' && o['model'].trim()) patch.ollama.model = o['model'];
+  }
+  if (r['display'] && typeof r['display'] === 'object') {
+    const d = r['display'] as Record<string, unknown>;
+    patch.display = {};
+    if ((LYRICS_MODES as readonly unknown[]).includes(d['lyricsMode'])) {
+      patch.display.lyricsMode = d['lyricsMode'] as LyricsMode;
+    }
+    if ((RUBY_MODES as readonly unknown[]).includes(d['ruby'])) {
+      patch.display.ruby = d['ruby'] as RubyMode;
+    }
   }
   return patch;
 }

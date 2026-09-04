@@ -769,3 +769,122 @@ body {
 .badge.clickable:hover {
   border-color: var(--accent);
 }
+
+/* ── two-track (Joysound style) lyrics ───────────────────── */
+
+.lyrics-layer.overlay.mode-twotrack {
+  top: 60%;
+  bottom: 0;
+  padding: 0;
+  background: none;
+}
+
+.lyrics-layer.panel.mode-twotrack {
+  position: relative;
+  height: 34%;
+  max-height: none;
+  padding: 0;
+  display: block;
+}
+
+.twotrack {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+
+.tt-lane {
+  flex: 1 1 50%;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3%;
+  overflow: hidden;
+  /* each lane is a size container so text scales with the lane (cqh) */
+  container-type: size;
+}
+
+/* Text is sized from the lane height (and shrunk once per line if it
+   would overflow — see TwoTrackLyrics); it never animates. */
+.tt-line {
+  position: relative;
+  white-space: nowrap;
+  font-size: 38cqh;
+  line-height: 1.15;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  will-change: opacity;
+}
+
+.twotrack.has-ruby .tt-line {
+  padding-top: 0.55em;
+}
+
+.tt-text {
+  display: block;
+}
+
+/* Base: bold white with a black outer stroke … */
+.tt-text.base {
+  color: #fff;
+  -webkit-text-stroke: 0.1em #000;
+  paint-order: stroke fill;
+}
+
+/* … highlight: red with a white outer stroke, revealed left→right by clip-path. */
+.tt-text.hl {
+  position: absolute;
+  inset: 0;
+  color: #e8262d;
+  -webkit-text-stroke: 0.1em #fff;
+  paint-order: stroke fill;
+  clip-path: inset(0 100% 0 0);
+}
+
+.tt-seg {
+  display: inline-block;
+  position: relative;
+}
+
+.tt-ruby {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 0.42em;
+  line-height: 1;
+  font-weight: 700;
+  white-space: nowrap;
+  -webkit-text-stroke: 0.08em;
+}
+
+/* settings: radio rows */
+.radio-row {
+  align-items: flex-start;
+}
+
+.radio-row input {
+  margin-top: 4px;
+}
+
+.radio-title {
+  display: block;
+}
+
+.radio-hint {
+  display: block;
+  font-size: 12px;
+}
+
+.inline-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 10px;
+  cursor: pointer;
+}

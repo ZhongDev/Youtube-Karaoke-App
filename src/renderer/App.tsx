@@ -9,6 +9,7 @@ import QueuePanel from './components/QueuePanel';
 import SettingsModal from './components/SettingsModal';
 import UrlBar from './components/UrlBar';
 import { useQueue } from './useQueue';
+import { useSettings } from './useSettings';
 import { formatTime } from './youtube';
 
 /** Unplayable video (embed-blocked, removed, …) → move on after this long. */
@@ -18,6 +19,8 @@ export default function App() {
   const clockRef = useRef(new SyncClock());
   const playerRef = useRef<PlayerHandle | null>(null);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  const { settings, update: updateSettings } = useSettings();
+  const lyricsMode = settings.display.lyricsMode;
 
   // The queue's head is what's playing. The Player is keyed by the queue
   // item id (not the video id) so the same song queued twice still remounts.
@@ -226,8 +229,13 @@ export default function App() {
       parsed={parsed}
       clock={clockRef.current}
       offsetMsRef={offsetMsRef}
+      mode={lyricsMode}
+      ruby={settings.display.ruby}
     />
   );
+  // Two-track lanes own the bottom 40% of the stage; the scroll window and
+  // plain text keep the lower-third gradient box.
+  const layerStyle = parsed && lyricsMode === 'twoTrack' ? 'mode-twotrack' : 'mode-window';
 
   return (
     <div className="shell">
@@ -344,12 +352,12 @@ export default function App() {
               </div>
             )}
             {displayMode === 'overlay' && (
-              <div className="lyrics-layer overlay">{lyricsBlock}</div>
+              <div className={`lyrics-layer overlay ${layerStyle}`}>{lyricsBlock}</div>
             )}
             {toast && <div className="toast">{toast}</div>}
           </div>
           {displayMode === 'panel' && (
-            <div className="lyrics-layer panel">{lyricsBlock}</div>
+            <div className={`lyrics-layer panel ${layerStyle}`}>{lyricsBlock}</div>
           )}
         </main>
 
@@ -379,7 +387,12 @@ export default function App() {
         />
       )}
       {settingsOpen && (
-        <SettingsModal appInfo={appInfo} onClose={() => setSettingsOpen(false)} />
+        <SettingsModal
+          appInfo={appInfo}
+          settings={settings}
+          onSave={updateSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
 
       <footer className="statusbar">

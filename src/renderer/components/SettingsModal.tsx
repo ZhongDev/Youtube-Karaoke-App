@@ -2,42 +2,52 @@ import { useEffect, useState } from 'react';
 import {
   PROVIDER_IDS,
   type AppInfo,
+  type LyricsMode,
   type ProviderId,
+  type RubyMode,
   type Settings,
   type SettingsPatch,
 } from '../../shared/ipc';
 
-// Settings modal (SPEC.md §7): provider toggles, Ollama endpoint/model,
-// cache folder info. Changes save immediately (toggles) or on blur/Enter
-// (text fields); main returns the effective settings after each write.
+// Settings modal (SPEC.md §7): lyrics display style, provider toggles,
+// Ollama endpoint/model, cache folder info. Changes save immediately
+// (toggles / radios) or on blur/Enter (text fields); the App owns the
+// settings state and hands back whatever main returns after each write.
 
 interface Props {
   appInfo: AppInfo | null;
+  settings: Settings;
+  onSave(patch: SettingsPatch): Promise<Settings>;
   onClose(): void;
 }
+
+const MODE_LABEL: Record<LyricsMode, { title: string; hint: string }> = {
+  twoTrack: {
+    title: 'Two-track (Joysound style)',
+    hint: 'Two fixed lanes in the bottom 40% of the video; lines fade in ~3 s early and are highlighted with a left-to-right wipe.',
+  },
+  scroll: {
+    title: 'Scroll window',
+    hint: 'Previous / current / next lines centred in the lower third.',
+  },
+};
+
+const RUBY_LABEL: Record<RubyMode, string> = {
+  none: 'None',
+  furigana: 'Furigana',
+  romaji: 'Romaji',
+};
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
   lrclib: 'LRCLIB (community synced-lyrics DB)',
   netease: 'NetEase Cloud Music (large CJK library, unofficial)',
 };
 
-export default function SettingsModal({ appInfo, onClose }: Props) {
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [endpoint, setEndpoint] = useState('');
-  const [model, setModel] = useState('');
+export default function SettingsModal({ appInfo, settings, onSave, onClose }: Props) {
+  const [endpoint, setEndpoint] = useState(settings.ollama.endpoint);
+  const [model, setModel] = useState(settings.ollama.model);
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
-
-  useEffect(() => {
-    window.karaoke
-      .settingsGet()
-      .then((s) => {
-        setSettings(s);
-        setEndpoint(s.ollama.endpoint);
-        setModel(s.ollama.model);
-      })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -52,10 +62,8 @@ export default function SettingsModal({ appInfo, onClose }: Props) {
 
   const save = (patch: SettingsPatch) => {
     setError(null);
-    window.karaoke
-      .settingsSet(patch)
+    onSave(patch)
       .then((s) => {
-        setSettings(s);
         setEndpoint(s.ollama.endpoint);
         setModel(s.ollama.model);
         setFlash('Saved');
@@ -65,7 +73,6 @@ export default function SettingsModal({ appInfo, onClose }: Props) {
   };
 
   const saveOllamaText = () => {
-    if (!settings) return;
     const patch: SettingsPatch = { ollama: {} };
     if (endpoint.trim() !== settings.ollama.endpoint) patch.ollama!.endpoint = endpoint.trim();
     if (model.trim() !== settings.ollama.model) patch.ollama!.model = model.trim();
@@ -88,9 +95,43 @@ export default function SettingsModal({ appInfo, onClose }: Props) {
           </button>
         </header>
 
-        {!settings && !error && <div className="muted">Loading…</div>}
+        <section>
+          <h3>Lyrics display</h3>
+          {(Object.keys(MODE_LABEL) as LyricsMode[]).map((m) => (
+            <label key={m} className="check-row radio-row">
+              <input
+                type="radio"
+                name="lyrics-mode"
+                checked={settings.display.lyricsMode === m}
+                onChange={() => save({ display: { lyricsMode: m } })}
+              />
+              <span>
+                <span className="radio-title">{MODE_LABEL[m].title}</span>
+                <span className="muted radio-hint">{MODE_LABEL[m].hint}</span>
+              </span>
+            </label>
+          ))}
+          <div className="check-row">
+            <span className="muted">Reading aid above the lyrics:</span>
+            {(Object.keys(RUBY_LABEL) as RubyMode[]).map((r) => (
+              <label key={r} className="inline-radio">
+                <input
+                  type="radio"
+                  name="ruby-mode"
+                  checked={settings.display.ruby === r}
+                  onChange={() => save({ display: { ruby: r } })}
+                />
+                <span>{RUBY_LABEL[r]}</span>
+              </label>
+            ))}
+          </div>
+          <p className="muted">
+            Furigana / romaji extraction is Phase 6 work — the two-track display is wired
+            for it but shows nothing above the text until then.
+          </p>
+        </section>
 
-        {settings && (
+        {
           <>
             <section>
               <h3>Lyrics providers</h3>
@@ -158,7 +199,7 @@ export default function SettingsModal({ appInfo, onClose }: Props) {
               </pre>
             </section>
           </>
-        )}
+        }
 
         <footer className="modal-foot">
           {error && <span className="warning-chip">⚠ {error}</span>}

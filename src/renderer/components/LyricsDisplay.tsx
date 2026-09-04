@@ -1,7 +1,8 @@
 import { useEffect, useState, type RefObject } from 'react';
-import type { LyricsDoc } from '../../shared/ipc';
+import type { LyricsDoc, LyricsMode, RubyMode } from '../../shared/ipc';
 import { lineIndexAt, type ParsedLrc } from '../../shared/lrc';
 import type { SyncClock } from '../../shared/syncClock';
+import TwoTrackLyrics from './TwoTrackLyrics';
 
 export type LyricsStatus = 'idle' | 'fetching' | 'done' | 'error';
 
@@ -12,9 +13,13 @@ interface Props {
   parsed: ParsedLrc | null;
   clock: SyncClock;
   offsetMsRef: RefObject<number>;
+  /** Synced-lyrics renderer (settings → display.lyricsMode). */
+  mode: LyricsMode;
+  ruby: RubyMode;
 }
 
-export default function LyricsDisplay({ status, doc, parsed, clock, offsetMsRef }: Props) {
+export default function LyricsDisplay(props: Props) {
+  const { status, doc, parsed, clock, offsetMsRef, mode, ruby } = props;
   if (status === 'fetching') {
     return <div className="lyrics-note">Fetching lyrics…</div>;
   }
@@ -34,6 +39,9 @@ export default function LyricsDisplay({ status, doc, parsed, clock, offsetMsRef 
         <pre>{doc.body}</pre>
       </div>
     );
+  }
+  if (mode === 'twoTrack') {
+    return <TwoTrackLyrics parsed={parsed} clock={clock} offsetMsRef={offsetMsRef} ruby={ruby} />;
   }
   return <SyncedLyrics parsed={parsed} clock={clock} offsetMsRef={offsetMsRef} />;
 }

@@ -61,20 +61,41 @@ export interface OllamaSettings {
   model: string; // e.g. llama3.1
 }
 
+/**
+ * How synced lyrics are drawn (SPEC.md §7):
+ *  - twoTrack: Joysound-style two fixed lanes in the bottom 40% of the
+ *    stage, fade in/out only, left→right wipe highlight (default)
+ *  - scroll: previous / current / next window
+ */
+export type LyricsMode = 'twoTrack' | 'scroll';
+export const LYRICS_MODES: readonly LyricsMode[] = ['twoTrack', 'scroll'];
+
+/** Reading aid drawn above the native text (extraction lands in Phase 6). */
+export type RubyMode = 'none' | 'furigana' | 'romaji';
+export const RUBY_MODES: readonly RubyMode[] = ['none', 'furigana', 'romaji'];
+
+export interface DisplaySettings {
+  lyricsMode: LyricsMode;
+  ruby: RubyMode;
+}
+
 export interface Settings {
   providers: Record<ProviderId, boolean>;
   ollama: OllamaSettings;
+  display: DisplaySettings;
 }
 
 /** Partial update; omitted fields keep their current value. */
 export interface SettingsPatch {
   providers?: Partial<Record<ProviderId, boolean>>;
   ollama?: Partial<OllamaSettings>;
+  display?: Partial<DisplaySettings>;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   providers: { lrclib: true, netease: true },
   ollama: { enabled: false, endpoint: 'http://localhost:11434', model: 'llama3.1' },
+  display: { lyricsMode: 'twoTrack', ruby: 'none' },
 };
 
 /** Per-item lyric state shown as a badge in the queue (SPEC.md §7). */

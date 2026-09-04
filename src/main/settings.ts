@@ -1,7 +1,11 @@
 import type Database from 'better-sqlite3';
 import {
   DEFAULT_SETTINGS,
+  LYRICS_MODES,
   PROVIDER_IDS,
+  RUBY_MODES,
+  type LyricsMode,
+  type RubyMode,
   type Settings,
   type SettingsPatch,
 } from '../shared/ipc';
@@ -36,12 +40,22 @@ export class SettingsStore {
       if (v !== undefined) providers[id] = v === '1';
     }
     const enabled = this.raw('ollama.enabled');
+    const mode = this.raw('display.lyricsMode');
+    const ruby = this.raw('display.ruby');
     return {
       providers,
       ollama: {
         enabled: enabled === undefined ? DEFAULT_SETTINGS.ollama.enabled : enabled === '1',
         endpoint: this.raw('ollama.endpoint') ?? DEFAULT_SETTINGS.ollama.endpoint,
         model: this.raw('ollama.model') ?? DEFAULT_SETTINGS.ollama.model,
+      },
+      display: {
+        lyricsMode: (LYRICS_MODES as readonly string[]).includes(mode ?? '')
+          ? (mode as LyricsMode)
+          : DEFAULT_SETTINGS.display.lyricsMode,
+        ruby: (RUBY_MODES as readonly string[]).includes(ruby ?? '')
+          ? (ruby as RubyMode)
+          : DEFAULT_SETTINGS.display.ruby,
       },
     };
   }
@@ -60,6 +74,13 @@ export class SettingsStore {
           this.write('ollama.endpoint', o.endpoint.trim().replace(/\/+$/, ''));
         }
         if (typeof o.model === 'string') this.write('ollama.model', o.model.trim());
+      }
+      const d = patch.display;
+      if (d) {
+        if (d.lyricsMode && LYRICS_MODES.includes(d.lyricsMode)) {
+          this.write('display.lyricsMode', d.lyricsMode);
+        }
+        if (d.ruby && RUBY_MODES.includes(d.ruby)) this.write('display.ruby', d.ruby);
       }
     })();
     return this.get();
