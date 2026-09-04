@@ -1,6 +1,5 @@
 import { net } from 'electron';
-import { diceSimilarity } from '../../shared/fuzzy';
-import { cleanTitleForSearch } from '../../shared/titleParser';
+import { bestSimilarity, cleanTitleForSearch, titleVariants } from '../../shared/titleParser';
 import { USER_AGENT } from '../metadata';
 import { cleanNeteaseLrc } from './neteaseLrc';
 import type { LyricsProvider, LyricsQuery, LyricsResult } from './types';
@@ -36,8 +35,12 @@ interface LyricReply {
 }
 
 async function fetchJson(url: string): Promise<unknown> {
+  // credentials: 'omit' — NetEase answers with decoy "hot" results once its
+  // NMTID cookie is echoed back by a non-browser client (verified: the same
+  // search with vs without the cookie). Never send or store its cookies.
   const res = await net.fetch(url, {
     headers: { 'User-Agent': USER_AGENT, Referer: 'https://music.163.com/' },
+    credentials: 'omit',
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`netease ${res.status} for ${url}`);
@@ -75,36 +78,62 @@ export class NeteaseProvider implements LyricsProvider {
   id = 'netease';
 
   async search(q: LyricsQuery): Promise<LyricsResult[]> {
-    const query =
-      [q.artist, q.track].filter(Boolean).join(' ').trim() || cleanTitleForSearch(q.rawTitle);
-    if (!query) return [];
+    const trackVariants = titleVariants(q.track);
+    const artistVariants = titleVariants(q.artist);
+    const wantTrack = trackVariants.length ? trackVariants : [cleanTitleForSearch(q.rawTitle)];
 
-    const params = new URLSearchParams({ s: query, type: '1', limit: '10' });
-    const reply = (await fetchJson(`${BASE}/search/get?${params}`)) as SearchReply;
-    const songs = reply.result?.songs ?? [];
+    // Free-text queries: as parsed, then the simplified / alt-script forms.
+    const pick = (arr: string[], i: number) => arr[Math.min(i, arr.length - 1)] ?? '';
+    const queries: string[] = [];
+    for (let i = 0; i < Math.max(trackVariants.length, artistVariants.length, 1); i++) {
+      const text = `${pick(artistVariants, i)} ${pick(trackVariants, i)}`.trim();
+      if (text && !queries.includes(text)) queries.push(text);
+    }
+    if (!queries.length) {
+      const raw = cleanTitleForSearch(q.rawTitle);
+      if (raw) queries.push(raw);
+    }
 
-    const wantTrack = q.track || cleanTitleForSearch(q.rawTitle);
-    const ranked = songs
-      .filter((s) => typeof s.id === 'number' && typeof s.name === 'string')
-      .map((song) => {
-        const artistNames = (song.artists ?? []).map((a) => a.name ?? '').join(' ');
-        const score =
-          0.55 * diceSimilarity(wantTrack, song.name) +
-          0.25 * (q.artist ? diceSimilarity(q.artist, artistNames) : 0.5) +
-          durationScore(q.durationS, song.duration);
-        return { song, artistNames, confidence: Math.min(score, 0.99) };
-      })
-      .filter((r) => r.confidence >= 0.45)
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, MAX_LYRIC_FETCHES);
+    type Hit = { song: NeteaseSong; artistNames: string; confidence: number };
+    let ranked: Hit[] = [];
+    for (const query of queries) {
+      const params = new URLSearchParams({ s: query, type: '1', limit: '10' });
+      const reply = (await fetchJson(`${BASE}/search/get?${params}`)) as SearchReply;
+      const songs = reply.result?.songs ?? [];
+      ranked = songs
+        .filter((s) => typeof s.id === 'number' && typeof s.name === 'string')
+        .map((song) => {
+          const artistNames = (song.artists ?? []).map((a) => a.name ?? '').join(' ');
+          const score =
+            0.55 * bestSimilarity(wantTrack, song.name) +
+            0.25 * (q.artist ? bestSimilarity(artistVariants, artistNames) : 0.5) +
+            durationScore(q.durationS, song.duration);
+          return { song, artistNames, confidence: Math.min(score, 0.99) };
+        })
+        .filter((r) => r.confidence >= 0.45)
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, MAX_LYRIC_FETCHES);
+      const top = ranked[0];
+      console.log(
+        `[netease] "${query}" → ${songs.length} songs, ${ranked.length} usable` +
+          (top ? ` (top: ${top.song.name} / ${top.artistNames} @${top.confidence.toFixed(2)})` : ''),
+      );
+      if (ranked.length) break;
+    }
 
     const out: LyricsResult[] = [];
     for (const { song, artistNames, confidence } of ranked) {
       const lp = new URLSearchParams({ id: String(song.id), lv: '1', kv: '1', tv: '-1' });
       const lyr = (await fetchJson(`${BASE}/song/lyric?${lp}`)) as LyricReply;
-      if (lyr.nolyric || lyr.uncollected) continue;
+      if (lyr.nolyric || lyr.uncollected) {
+        console.log(`[netease] song ${song.id}: no lyrics`);
+        continue;
+      }
       const body = cleanNeteaseLrc(lyr.lrc?.lyric);
-      if (!body) continue;
+      if (!body) {
+        console.log(`[netease] song ${song.id}: empty/instrumental body`);
+        continue;
+      }
 
       const common = {
         confidence,

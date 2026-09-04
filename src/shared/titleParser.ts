@@ -102,6 +102,29 @@ export function cleanTitleForSearch(raw: string): string {
   return cleanFragment(stripNoiseBrackets(normalizeTitle(raw)));
 }
 
+/**
+ * Search variants of a name that carries an alt-script form in brackets —
+ * K-pop especially: "Blueming(블루밍)" → ["Blueming(블루밍)", "Blueming",
+ * "블루밍"], "봄날 (Spring Day)" → [full, "봄날", "Spring Day"]. Providers
+ * try them in order and match against all of them. No brackets → [name].
+ */
+export function titleVariants(name: string): string[] {
+  const full = name.trim();
+  const out = full ? [full] : [];
+  const m = /^(.*?)\s*[(（【[]([^()（）【】[\]]+)[)）】\]]$/.exec(full);
+  if (m && m[1]!.trim()) {
+    for (const v of [tidy(m[1]!), tidy(m[2]!)]) {
+      if (v && !out.includes(v)) out.push(v);
+    }
+  }
+  return out;
+}
+
+/** Best fuzzy match of `s` against any variant (see titleVariants). */
+export function bestSimilarity(variants: string[], s: string): number {
+  return variants.reduce((best, v) => Math.max(best, diceSimilarity(v, s)), 0);
+}
+
 /** Channel name → plausible artist ("XVEVO", "X - Topic", "X Official"…). */
 export function cleanChannelName(ch: string): string {
   let s = normalizeTitle(ch)

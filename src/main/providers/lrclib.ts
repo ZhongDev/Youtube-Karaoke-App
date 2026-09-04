@@ -1,6 +1,5 @@
 import { net } from 'electron';
-import { diceSimilarity } from '../../shared/fuzzy';
-import { cleanTitleForSearch } from '../../shared/titleParser';
+import { bestSimilarity, cleanTitleForSearch, titleVariants } from '../../shared/titleParser';
 import { USER_AGENT } from '../metadata';
 import type { LyricsProvider, LyricsQuery, LyricsResult } from './types';
 
@@ -53,6 +52,21 @@ function durationScore(wantS: number | undefined, gotS: number | null): number {
   return -0.25;
 }
 
+/**
+ * (track, artist) pairs to try in order: as given, then progressively
+ * simplified forms, finally the main track name alone. At most 4 requests
+ * on a total miss; one on the usual hit.
+ */
+function fieldedAttempts(tracks: string[], artists: string[]): Array<[string, string]> {
+  if (!tracks.length) return [];
+  const pick = (arr: string[], i: number) => arr[Math.min(i, arr.length - 1)] ?? '';
+  const out: Array<[string, string]> = [];
+  const n = Math.max(tracks.length, artists.length);
+  for (let i = 0; i < n; i++) out.push([pick(tracks, i), pick(artists, i)]);
+  if (tracks.length > 1) out.push([tracks[1]!, '']);
+  return out.filter(([t, a], i) => out.findIndex(([t2, a2]) => t2 === t && a2 === a) === i);
+}
+
 export class LrclibProvider implements LyricsProvider {
   id = 'lrclib';
 
@@ -72,12 +86,17 @@ export class LrclibProvider implements LyricsProvider {
       }
     }
 
-    // 2) Fielded search, then 3) raw-title q= fallback; rank ourselves.
+    // 2) Fielded search — "Blueming(블루밍)" style names are retried with
+    //    their bracket-free / alt-script forms — then 3) raw-title q=
+    //    fallback; rank ourselves.
+    const trackVariants = titleVariants(q.track);
+    const artistVariants = titleVariants(q.artist);
     let records: LrclibRecord[] = [];
-    if (q.track) {
-      const params = new URLSearchParams({ track_name: q.track });
-      if (q.artist) params.set('artist_name', q.artist);
+    for (const [track, artist] of fieldedAttempts(trackVariants, artistVariants)) {
+      const params = new URLSearchParams({ track_name: track });
+      if (artist) params.set('artist_name', artist);
       records = ((await fetchJson(`${BASE}/search?${params}`)) ?? []) as LrclibRecord[];
+      if (records.length) break;
     }
     if (!records.length) {
       const qText = cleanTitleForSearch(q.rawTitle);
@@ -87,12 +106,12 @@ export class LrclibProvider implements LyricsProvider {
       }
     }
 
-    const wantTrack = q.track || cleanTitleForSearch(q.rawTitle);
+    const wantTrack = trackVariants.length ? trackVariants : [cleanTitleForSearch(q.rawTitle)];
     for (const rec of records) {
       if (rec.instrumental || byId.has(rec.id) || isJunkSynced(rec)) continue;
       const score =
-        0.55 * diceSimilarity(wantTrack, rec.trackName) +
-        0.25 * (q.artist ? diceSimilarity(q.artist, rec.artistName) : 0.5) +
+        0.55 * bestSimilarity(wantTrack, rec.trackName) +
+        0.25 * (q.artist ? bestSimilarity(artistVariants, rec.artistName) : 0.5) +
         durationScore(q.durationS, rec.duration);
       if (score >= 0.45) byId.set(rec.id, { rec, confidence: Math.min(score, 0.99) });
     }

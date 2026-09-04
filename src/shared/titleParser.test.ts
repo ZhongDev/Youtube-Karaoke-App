@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bestSimilarity,
   cleanChannelName,
   cleanTitleForSearch,
   parseVideoTitle,
+  titleVariants,
 } from './titleParser';
 
 /** Assert the expected pair appears in the top N candidates. */
@@ -231,5 +233,34 @@ describe('cleanTitleForSearch / cleanChannelName', () => {
     expect(cleanChannelName('Rick Astley - Topic')).toBe('Rick Astley');
     expect(cleanChannelName('QueenOfficial')).toBe('QueenOfficial');
     expect(cleanChannelName('TaylorSwiftVEVO')).toBe('TaylorSwift');
+  });
+});
+
+describe('titleVariants', () => {
+  it('splits a bracketed alt-script name into full / main / alt', () => {
+    expect(titleVariants('Blueming(블루밍)')).toEqual(['Blueming(블루밍)', 'Blueming', '블루밍']);
+    expect(titleVariants('봄날 (Spring Day)')).toEqual(['봄날 (Spring Day)', '봄날', 'Spring Day']);
+    expect(titleVariants('IU(아이유)')).toEqual(['IU(아이유)', 'IU', '아이유']);
+    expect(titleVariants('夜に駆ける（Racing into the Night）')).toEqual([
+      '夜に駆ける（Racing into the Night）',
+      '夜に駆ける',
+      'Racing into the Night',
+    ]);
+  });
+
+  it('returns just the name when there is nothing to split', () => {
+    expect(titleVariants('Pretender')).toEqual(['Pretender']);
+    expect(titleVariants('(Not) A Devil')).toEqual(['(Not) A Devil']);
+    expect(titleVariants('')).toEqual([]);
+    expect(titleVariants('  ')).toEqual([]);
+  });
+});
+
+describe('bestSimilarity', () => {
+  it('takes the best variant', () => {
+    const v = titleVariants('Blueming(블루밍)');
+    expect(bestSimilarity(v, 'Blueming')).toBe(1);
+    expect(bestSimilarity(v, '블루밍')).toBe(1);
+    expect(bestSimilarity([], 'x')).toBe(0);
   });
 });
