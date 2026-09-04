@@ -59,6 +59,13 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX queue_position ON queue(position);
   `,
+  // v4 — Phase 3: user-pinned lyrics source (null = best by rank) and the
+  // provenance of artist/track ('parsed' | 'ollama' | 'user'; user edits
+  // are never overwritten by a re-fetch).
+  `
+  ALTER TABLE tracks ADD COLUMN active_source TEXT;
+  ALTER TABLE tracks ADD COLUMN meta_source TEXT;
+  `,
 ];
 
 export function getDbPath(): string {

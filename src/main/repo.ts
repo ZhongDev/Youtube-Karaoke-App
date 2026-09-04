@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
-import type { LyricsDoc, LyricsKind, TrackInfo } from '../shared/ipc';
+import type { LyricsDoc, LyricsKind, MetaSource, TrackInfo } from '../shared/ipc';
+import { isLanguage, type Language } from '../shared/language';
 
 export interface TrackRow {
   video_id: string;
@@ -11,6 +12,9 @@ export interface TrackRow {
   is_topic: number;
   embeddable: number;
   language: string | null;
+  /** User-pinned lyrics source; null = best by rank. */
+  active_source: string | null;
+  meta_source: string | null;
 }
 
 interface LyricsRow {
@@ -40,6 +44,11 @@ const KIND_RANK: Record<LyricsKind, number> = {
   plain: 1,
 };
 
+/** Sources that are never discarded by a provider re-fetch. */
+const USER_SOURCES = ['manual', 'aligned'] as const;
+
+const META_SOURCES: readonly MetaSource[] = ['parsed', 'ollama', 'user'];
+
 export function toTrackInfo(r: TrackRow): TrackInfo {
   return {
     videoId: r.video_id,
@@ -50,7 +59,18 @@ export function toTrackInfo(r: TrackRow): TrackInfo {
     durationS: r.duration_s,
     isTopic: r.is_topic === 1,
     embeddable: r.embeddable !== 0,
+    language: isLanguage(r.language) ? r.language : null,
+    metaSource: (META_SOURCES as readonly string[]).includes(r.meta_source ?? '')
+      ? (r.meta_source as MetaSource)
+      : null,
   };
+}
+
+/** Rank-descending, then by source name — a stable order for the inspector. */
+export function sortLyricsDocs(docs: LyricsDoc[]): LyricsDoc[] {
+  return [...docs].sort(
+    (a, b) => KIND_RANK[b.kind] - KIND_RANK[a.kind] || a.source.localeCompare(b.source),
+  );
 }
 
 export class Repo {
@@ -68,16 +88,18 @@ export class Repo {
     channel: string;
     isTopic: boolean;
     durationS?: number;
+    language?: Language;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO tracks (video_id, title, channel, is_topic, duration_s)
-         VALUES (@videoId, @title, @channel, @isTopic, @durationS)
+        `INSERT INTO tracks (video_id, title, channel, is_topic, duration_s, language)
+         VALUES (@videoId, @title, @channel, @isTopic, @durationS, @language)
          ON CONFLICT(video_id) DO UPDATE SET
            title = excluded.title,
            channel = excluded.channel,
            is_topic = excluded.is_topic,
            duration_s = COALESCE(excluded.duration_s, tracks.duration_s),
+           language = COALESCE(excluded.language, tracks.language),
            updated_at = datetime('now')`,
       )
       .run({
@@ -86,16 +108,38 @@ export class Repo {
         channel: t.channel,
         isTopic: t.isTopic ? 1 : 0,
         durationS: t.durationS ?? null,
+        language: t.language ?? null,
       });
   }
 
-  setParsedMeta(videoId: string, artist: string | null, track: string | null): void {
+  setMeta(
+    videoId: string,
+    artist: string | null,
+    track: string | null,
+    source: MetaSource,
+  ): void {
     this.db
       .prepare(
-        `UPDATE tracks SET artist = ?, track = ?, updated_at = datetime('now')
+        `UPDATE tracks SET artist = ?, track = ?, meta_source = ?, updated_at = datetime('now')
          WHERE video_id = ?`,
       )
-      .run(artist, track, videoId);
+      .run(artist, track, source, videoId);
+  }
+
+  setLanguage(videoId: string, language: Language): void {
+    this.db
+      .prepare(
+        `UPDATE tracks SET language = ?, updated_at = datetime('now') WHERE video_id = ?`,
+      )
+      .run(language, videoId);
+  }
+
+  setActiveSource(videoId: string, source: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE tracks SET active_source = ?, updated_at = datetime('now') WHERE video_id = ?`,
+      )
+      .run(source, videoId);
   }
 
   setDuration(videoId: string, durationS: number): void {
@@ -151,12 +195,28 @@ export class Repo {
       .run(videoId, source, kind, body, providerDurationS ?? null);
   }
 
-  /** Best available lyrics by rank: synced_word > synced_line > plain. */
-  bestLyrics(videoId: string): LyricsDoc | null {
-    const docs = this.getLyrics(videoId);
+  deleteLyrics(videoId: string, source: string): void {
+    this.db.prepare('DELETE FROM lyrics WHERE video_id = ? AND source = ?').run(videoId, source);
+  }
+
+  /** Drop provider-fetched rows (keeps manual / aligned) ahead of a re-fetch. */
+  deleteProviderLyrics(videoId: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM lyrics WHERE video_id = ? AND source NOT IN (${USER_SOURCES.map(() => '?').join(',')})`,
+      )
+      .run(videoId, ...USER_SOURCES);
+  }
+
+  /**
+   * Active lyrics: the user-pinned source when it exists, else best by rank
+   * (synced_word > synced_line > plain). SPEC.md §4.
+   */
+  activeLyrics(videoId: string): LyricsDoc | null {
+    const docs = sortLyricsDocs(this.getLyrics(videoId));
     if (!docs.length) return null;
-    docs.sort((a, b) => KIND_RANK[b.kind] - KIND_RANK[a.kind]);
-    return docs[0]!;
+    const pinned = this.getTrack(videoId)?.active_source;
+    return (pinned && docs.find((d) => d.source === pinned)) || docs[0]!;
   }
 
   getOffset(videoId: string): number {
@@ -182,10 +242,13 @@ export class Repo {
       .prepare(
         `SELECT q.id, q.video_id, t.title, t.channel, t.artist, t.track,
                 t.duration_s, t.is_topic, t.embeddable,
-                (SELECT l.kind FROM lyrics l WHERE l.video_id = q.video_id
-                 ORDER BY CASE l.kind WHEN 'synced_word' THEN 3
-                                      WHEN 'synced_line' THEN 2 ELSE 1 END DESC
-                 LIMIT 1) AS best_kind
+                COALESCE(
+                  (SELECT l.kind FROM lyrics l
+                   WHERE l.video_id = q.video_id AND l.source = t.active_source),
+                  (SELECT l.kind FROM lyrics l WHERE l.video_id = q.video_id
+                   ORDER BY CASE l.kind WHEN 'synced_word' THEN 3
+                                        WHEN 'synced_line' THEN 2 ELSE 1 END DESC
+                   LIMIT 1)) AS best_kind
          FROM queue q LEFT JOIN tracks t ON t.video_id = q.video_id
          ORDER BY q.position`,
       )

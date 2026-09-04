@@ -2,16 +2,20 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import type Database from 'better-sqlite3';
 import {
   IPC,
+  PROVIDER_IDS,
   type AppInfo,
   type QueueAddMode,
   type QueueSnapshot,
   type ResolveResult,
+  type Settings,
+  type SettingsPatch,
 } from '../shared/ipc';
 import { extractVideoId } from '../shared/youtubeUrl';
 import { schemaVersion } from './db';
 import { LyricsService } from './lyricsService';
 import { QueueService } from './queueService';
 import { Repo } from './repo';
+import { SettingsStore } from './settings';
 
 const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 
@@ -27,9 +31,39 @@ function assertInt(n: unknown, what: string): number {
   return n;
 }
 
+function assertText(v: unknown, what: string, maxLen: number): string {
+  if (typeof v !== 'string' || v.length > maxLen) throw new Error(`Invalid ${what}`);
+  return v;
+}
+
+/** Keep only well-typed, known keys of a settings patch from the renderer. */
+function sanitizeSettingsPatch(raw: unknown): SettingsPatch {
+  if (!raw || typeof raw !== 'object') throw new Error('Invalid settings patch');
+  const r = raw as Record<string, unknown>;
+  const patch: SettingsPatch = {};
+  if (r['providers'] && typeof r['providers'] === 'object') {
+    const p = r['providers'] as Record<string, unknown>;
+    patch.providers = {};
+    for (const id of PROVIDER_IDS) {
+      if (typeof p[id] === 'boolean') patch.providers[id] = p[id];
+    }
+  }
+  if (r['ollama'] && typeof r['ollama'] === 'object') {
+    const o = r['ollama'] as Record<string, unknown>;
+    patch.ollama = {};
+    if (typeof o['enabled'] === 'boolean') patch.ollama.enabled = o['enabled'];
+    if (typeof o['endpoint'] === 'string' && /^https?:\/\/\S+$/.test(o['endpoint'].trim())) {
+      patch.ollama.endpoint = o['endpoint'];
+    }
+    if (typeof o['model'] === 'string' && o['model'].trim()) patch.ollama.model = o['model'];
+  }
+  return patch;
+}
+
 export function registerIpcHandlers(db: Database.Database, dbPath: string): void {
   const repo = new Repo(db);
-  const lyrics = new LyricsService(repo);
+  const settings = new SettingsStore(db);
+  const lyrics = new LyricsService(repo, settings);
   const queue = new QueueService(repo, lyrics, (snapshot: QueueSnapshot) => {
     for (const w of BrowserWindow.getAllWindows()) {
       if (!w.isDestroyed()) w.webContents.send(IPC.queueChanged, snapshot);
@@ -96,4 +130,53 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
   ipcMain.handle(IPC.queueAdvance, (): void => queue.advance());
 
   ipcMain.handle(IPC.queueClear, (): void => queue.clear());
+
+  // ── lyrics inspector ──
+  ipcMain.handle(
+    IPC.lyricsSetActive,
+    (_e, videoId: unknown, source: unknown): ResolveResult => {
+      const id = assertVideoId(videoId);
+      const src = source === null ? null : assertText(source, 'source', 64);
+      const r = lyrics.setActive(id, src);
+      queue.refresh(id);
+      return r;
+    },
+  );
+
+  ipcMain.handle(IPC.lyricsSetManual, (_e, videoId: unknown, text: unknown): ResolveResult => {
+    const id = assertVideoId(videoId);
+    const r = lyrics.setManual(id, assertText(text, 'lyrics text', 200_000));
+    queue.refresh(id);
+    return r;
+  });
+
+  ipcMain.handle(
+    IPC.lyricsSetMeta,
+    async (_e, videoId: unknown, artist: unknown, track: unknown): Promise<ResolveResult> => {
+      const id = assertVideoId(videoId);
+      const r = await lyrics.setMeta(
+        id,
+        assertText(artist, 'artist', 300),
+        assertText(track, 'track', 300),
+      );
+      queue.refresh(id);
+      return r;
+    },
+  );
+
+  ipcMain.handle(IPC.lyricsRefetch, async (_e, videoId: unknown): Promise<ResolveResult> => {
+    const id = assertVideoId(videoId);
+    const r = await lyrics.refetch(id);
+    queue.refresh(id);
+    return r;
+  });
+
+  // ── settings ──
+  ipcMain.handle(IPC.settingsGet, (): Settings => settings.get());
+
+  ipcMain.handle(IPC.settingsSet, (_e, patch: unknown): Settings => {
+    const s = settings.set(sanitizeSettingsPatch(patch));
+    console.log('[settings] updated:', JSON.stringify(s));
+    return s;
+  });
 }

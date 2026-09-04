@@ -21,6 +21,16 @@ const api: KaraokeApi = {
     ipcRenderer.on(IPC.queueChanged, listener);
     return () => ipcRenderer.removeListener(IPC.queueChanged, listener);
   },
+
+  lyricsSetActive: (videoId, source) =>
+    ipcRenderer.invoke(IPC.lyricsSetActive, videoId, source),
+  lyricsSetManual: (videoId, text) => ipcRenderer.invoke(IPC.lyricsSetManual, videoId, text),
+  lyricsSetMeta: (videoId, artist, track) =>
+    ipcRenderer.invoke(IPC.lyricsSetMeta, videoId, artist, track),
+  lyricsRefetch: (videoId) => ipcRenderer.invoke(IPC.lyricsRefetch, videoId),
+
+  settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
+  settingsSet: (patch) => ipcRenderer.invoke(IPC.settingsSet, patch),
 };
 
 contextBridge.exposeInMainWorld('karaoke', api);
