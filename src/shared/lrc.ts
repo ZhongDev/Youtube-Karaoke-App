@@ -138,3 +138,11 @@ export function lineIndexAt(lines: LrcLine[], tMs: number): number {
   }
   return ans;
 }
+
+/**
+ * Classify arbitrary pasted text: enhanced LRC → synced_word, LRC →
+ * synced_line, anything without timestamps → plain.
+ */
+export function lyricsKindOf(text: string): 'synced_word' | 'synced_line' | 'plain' {
+  return parseLrc(text)?.kind ?? 'plain';
+}

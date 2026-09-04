@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lineIndexAt, parseLrc } from './lrc';
+import { lineIndexAt, lyricsKindOf, parseLrc } from './lrc';
 
 describe('parseLrc', () => {
   it('parses basic lines sorted by time', () => {
@@ -86,5 +86,14 @@ describe('lineIndexAt', () => {
     expect(lineIndexAt(lines, 4999)).toBe(0);
     expect(lineIndexAt(lines, 5000)).toBe(1);
     expect(lineIndexAt(lines, 99999)).toBe(2);
+  });
+});
+
+describe('lyricsKindOf', () => {
+  it('classifies pasted text', () => {
+    expect(lyricsKindOf('just some\nplain lines')).toBe('plain');
+    expect(lyricsKindOf('[00:01.00]a\n[00:02.00]b')).toBe('synced_line');
+    expect(lyricsKindOf('[00:01.00]<00:01.00>a <00:01.50>b')).toBe('synced_word');
+    expect(lyricsKindOf('[ar:Only metadata]')).toBe('plain');
   });
 });
