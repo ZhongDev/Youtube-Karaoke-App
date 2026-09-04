@@ -109,10 +109,17 @@ export class LrclibProvider implements LyricsProvider {
     const wantTrack = trackVariants.length ? trackVariants : [cleanTitleForSearch(q.rawTitle)];
     for (const rec of records) {
       if (rec.instrumental || byId.has(rec.id) || isJunkSynced(rec)) continue;
-      const score =
+      const direct =
         0.55 * bestSimilarity(wantTrack, rec.trackName) +
-        0.25 * (q.artist ? bestSimilarity(artistVariants, rec.artistName) : 0.5) +
-        durationScore(q.durationS, rec.duration);
+        0.25 * (q.artist ? bestSimilarity(artistVariants, rec.artistName) : 0.5);
+      // Community records sometimes have artist/track swapped (seen on
+      // "Title - Artist" style uploads); accept those at a small penalty.
+      const swapped = q.artist
+        ? 0.9 *
+          (0.55 * bestSimilarity(wantTrack, rec.artistName) +
+            0.25 * bestSimilarity(artistVariants, rec.trackName))
+        : 0;
+      const score = Math.max(direct, swapped) + durationScore(q.durationS, rec.duration);
       if (score >= 0.45) byId.set(rec.id, { rec, confidence: Math.min(score, 0.99) });
     }
 
