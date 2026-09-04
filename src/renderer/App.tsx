@@ -3,8 +3,10 @@ import type { AppInfo, QueueAddMode, ResolveResult } from '../shared/ipc';
 import { parseLrc } from '../shared/lrc';
 import { SyncClock } from '../shared/syncClock';
 import LyricsDisplay, { type LyricsStatus } from './components/LyricsDisplay';
+import LyricsInspector from './components/LyricsInspector';
 import Player, { type PlayerHandle } from './components/Player';
 import QueuePanel from './components/QueuePanel';
+import SettingsModal from './components/SettingsModal';
 import UrlBar from './components/UrlBar';
 import { useQueue } from './useQueue';
 import { formatTime } from './youtube';
@@ -26,6 +28,8 @@ export default function App() {
   const videoId = current?.videoId ?? null;
   const currentIdRef = useRef(currentId);
   currentIdRef.current = currentId;
+  const currentVideoIdRef = useRef(videoId);
+  currentVideoIdRef.current = videoId;
 
   // The item restored from disk at launch is cued, not autoplayed; every
   // later head change (add, skip, song ended) is user-driven → autoplay.
@@ -46,6 +50,11 @@ export default function App() {
 
   const [displayMode, setDisplayMode] = useState<'overlay' | 'panel'>('overlay');
   const [queueOpen, setQueueOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const modalOpen = inspectorOpen || settingsOpen;
+  const modalOpenRef = useRef(false);
+  modalOpenRef.current = modalOpen;
   const [playerState, setPlayerState] = useState('idle');
   const [timeS, setTimeS] = useState(0);
   const [durationS, setDurationS] = useState(0);
@@ -126,12 +135,27 @@ export default function App() {
     [queueAdd],
   );
 
-  // Hotkeys: Space play/pause; [ / ] nudge offset ∓100ms, Shift ∓500ms, \ resets.
+  // A fresh result from the inspector (source switch, manual paste, edit).
+  const adoptResult = useCallback((r: ResolveResult) => {
+    if (r.track.videoId !== currentVideoIdRef.current) return; // song changed meanwhile
+    setResult(r);
+    setLoadError(null);
+    setLyricsStatus('done');
+  }, []);
+
+  // Hotkeys: Space play/pause; [ / ] nudge offset ∓100ms, Shift ∓500ms, \ resets;
+  // i = lyrics inspector. All off while a modal is open (Esc closes it).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+      if (modalOpenRef.current) return;
 
+      if (e.key === 'i' && videoId) {
+        e.preventDefault();
+        setInspectorOpen(true);
+        return;
+      }
       if (e.key === ' ') {
         if (playerRef.current) {
           e.preventDefault();
@@ -184,7 +208,8 @@ export default function App() {
         : doc.kind === 'synced_line'
           ? '✓ line-synced'
           : '≈ plain (unsynced)';
-    return `${label} · ${doc.source}${result?.fromCache ? ' · cached' : ''}`;
+    const lang = result?.track.language ? ` · ${result.track.language}` : '';
+    return `${label} · ${doc.source}${lang}${result?.fromCache ? ' · cached' : ''}`;
   })();
 
   const nowPlayingLabel = current
@@ -210,7 +235,15 @@ export default function App() {
         <span className="brand">YouTube Karaoke</span>
         <UrlBar onAdd={addToQueue} />
         <span className="topbar-status">
-          {badge && <span className="badge">{badge}</span>}
+          {badge && (
+            <button
+              className="badge clickable"
+              title="Lyrics inspector (i): sources, raw LRC, manual paste, edit metadata"
+              onClick={() => setInspectorOpen(true)}
+            >
+              {badge}
+            </button>
+          )}
           <button
             className="mode-toggle"
             title="Toggle lyrics overlay / panel"
@@ -224,6 +257,13 @@ export default function App() {
             onClick={() => setQueueOpen((o) => !o)}
           >
             ☰ queue{queue.items.length ? ` · ${queue.items.length}` : ''}
+          </button>
+          <button
+            className="mode-toggle"
+            title="Settings: providers, Ollama, cache"
+            onClick={() => setSettingsOpen(true)}
+          >
+            ⚙
           </button>
           <span className="time-readout">
             {formatTime(timeS)} / {formatTime(durationS)}
@@ -326,6 +366,21 @@ export default function App() {
           />
         )}
       </div>
+
+      {inspectorOpen && current && videoId && (
+        <LyricsInspector
+          key={current.id}
+          videoId={videoId}
+          title={current.title}
+          status={lyricsStatus}
+          result={result}
+          onResult={adoptResult}
+          onClose={() => setInspectorOpen(false)}
+        />
+      )}
+      {settingsOpen && (
+        <SettingsModal appInfo={appInfo} onClose={() => setSettingsOpen(false)} />
+      )}
 
       <footer className="statusbar">
         <span className="time-readout">t = {formatTime(timeS)}</span>
