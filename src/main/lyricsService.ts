@@ -49,7 +49,13 @@ export class LyricsService {
     if (existing) {
       const r = await existing;
       if (r.lyrics || !durationS) {
-        if (durationS && !r.track.durationS) this.repo.setDuration(videoId, durationS);
+        if (durationS && !r.track.durationS) {
+          // The in-flight result predates the duration: store it and answer
+          // with a fresh view so the drift warning (which needs it) is not
+          // missed for a song played right after it was added.
+          this.repo.setDuration(videoId, durationS);
+          return this.current(videoId);
+        }
         return r;
       }
       // First attempt found nothing and we now know the duration — retry.
