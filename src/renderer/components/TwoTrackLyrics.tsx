@@ -30,16 +30,21 @@ const WIPE_OVERLAP_MS = 80;
  */
 const INK_BLEED = '0.3em';
 
+// Both return an explicit inline value in every state. Clearing the inline
+// style instead would fall back to the stylesheet, whose default for the
+// highlight layer is the fully hidden clip — the line would vanish the
+// moment its wipe completed instead of holding and fading out.
+
 /** Highlight layer: revealed from the left up to `progress` (0..1). */
 function highlightClip(progress: number): string {
   if (progress <= 0) return 'inset(0 100% 0 0)'; // empty region: no ink at all
-  if (progress >= 1) return ''; // unclipped: full stroke on every side
+  if (progress >= 1) return 'none'; // unclipped: full stroke on every side
   return `inset(-${INK_BLEED} ${((1 - progress) * 100).toFixed(2)}% -${INK_BLEED} -${INK_BLEED})`;
 }
 
 /** Base layer: hidden from the left up to `trailing` (0..1). */
 function baseClip(trailing: number): string {
-  if (trailing <= 0) return '';
+  if (trailing <= 0) return 'none';
   if (trailing >= 1) return 'inset(0 0 0 100%)'; // empty region
   return `inset(-${INK_BLEED} -${INK_BLEED} -${INK_BLEED} ${(trailing * 100).toFixed(2)}%)`;
 }
