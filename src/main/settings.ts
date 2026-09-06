@@ -1,13 +1,17 @@
 import type Database from 'better-sqlite3';
 import {
+  ALIGN_DEVICES,
   DEFAULT_SETTINGS,
   LYRICS_MODES,
   PROVIDER_IDS,
   RUBY_MODES,
+  WHISPER_MODELS,
+  type AlignDevice,
   type LyricsMode,
   type RubyMode,
   type Settings,
   type SettingsPatch,
+  type WhisperModel,
 } from '../shared/ipc';
 
 // Settings live in the `settings(key, value)` table as one row per leaf
@@ -42,6 +46,8 @@ export class SettingsStore {
     const enabled = this.raw('ollama.enabled');
     const mode = this.raw('display.lyricsMode');
     const ruby = this.raw('display.ruby');
+    const alignModel = this.raw('align.model');
+    const alignDevice = this.raw('align.device');
     return {
       providers,
       ollama: {
@@ -59,6 +65,17 @@ export class SettingsStore {
       },
       ytdlp: {
         path: this.raw('ytdlp.path') ?? DEFAULT_SETTINGS.ytdlp.path,
+      },
+      align: {
+        model: (WHISPER_MODELS as readonly string[]).includes(alignModel ?? '')
+          ? (alignModel as WhisperModel)
+          : DEFAULT_SETTINGS.align.model,
+        device: (ALIGN_DEVICES as readonly string[]).includes(alignDevice ?? '')
+          ? (alignDevice as AlignDevice)
+          : DEFAULT_SETTINGS.align.device,
+      },
+      uv: {
+        path: this.raw('uv.path') ?? DEFAULT_SETTINGS.uv.path,
       },
     };
   }
@@ -86,6 +103,12 @@ export class SettingsStore {
         if (d.ruby && RUBY_MODES.includes(d.ruby)) this.write('display.ruby', d.ruby);
       }
       if (typeof patch.ytdlp?.path === 'string') this.write('ytdlp.path', patch.ytdlp.path.trim());
+      const a = patch.align;
+      if (a) {
+        if (a.model && WHISPER_MODELS.includes(a.model)) this.write('align.model', a.model);
+        if (a.device && ALIGN_DEVICES.includes(a.device)) this.write('align.device', a.device);
+      }
+      if (typeof patch.uv?.path === 'string') this.write('uv.path', patch.uv.path.trim());
     })();
     return this.get();
   }

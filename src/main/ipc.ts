@@ -1,10 +1,14 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import type Database from 'better-sqlite3';
 import {
+  ALIGN_DEVICES,
   IPC,
   LYRICS_MODES,
   PROVIDER_IDS,
   RUBY_MODES,
+  WHISPER_MODELS,
+  type AlignDevice,
+  type AlignSnapshot,
   type AppInfo,
   type DisplayInfo,
   type LyricsMode,
@@ -16,15 +20,19 @@ import {
   type Settings,
   type SettingsPatch,
   type TopicSuggestion,
+  type UvStatus,
+  type WhisperModel,
   type YtDlpStatus,
 } from '../shared/ipc';
 import { extractVideoId } from '../shared/youtubeUrl';
+import { AlignService } from './alignService';
 import { schemaVersion } from './db';
 import { LyricsService } from './lyricsService';
 import { QueueService } from './queueService';
 import { Repo } from './repo';
 import { SettingsStore } from './settings';
 import { TopicSuggester } from './topicSuggest';
+import { Uv } from './uv';
 import { listDisplays, setFullscreen } from './window';
 import { YtDlp } from './ytdlp';
 
@@ -89,6 +97,20 @@ function sanitizeSettingsPatch(raw: unknown): SettingsPatch {
       patch.ytdlp = { path: y['path'] };
     }
   }
+  if (r['align'] && typeof r['align'] === 'object') {
+    const a = r['align'] as Record<string, unknown>;
+    patch.align = {};
+    if ((WHISPER_MODELS as readonly unknown[]).includes(a['model'])) {
+      patch.align.model = a['model'] as WhisperModel;
+    }
+    if ((ALIGN_DEVICES as readonly unknown[]).includes(a['device'])) {
+      patch.align.device = a['device'] as AlignDevice;
+    }
+  }
+  if (r['uv'] && typeof r['uv'] === 'object') {
+    const u = r['uv'] as Record<string, unknown>;
+    if (typeof u['path'] === 'string' && u['path'].length <= 1000) patch.uv = { path: u['path'] };
+  }
   return patch;
 }
 
@@ -108,6 +130,16 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
   queue.init();
   const ytdlp = new YtDlp(settings, (p) => broadcast(IPC.searchInstallProgress, p));
   const topics = new TopicSuggester(repo, ytdlp);
+  const uv = new Uv(settings, (p) => broadcast(IPC.envProgress, p));
+  const align = new AlignService(
+    repo,
+    settings,
+    uv,
+    ytdlp,
+    (s) => broadcast(IPC.alignChanged, s),
+    (videoId) => queue.refresh(videoId),
+  );
+  app.on('before-quit', () => align.shutdown());
 
   ipcMain.handle(IPC.getAppInfo, (): AppInfo => ({
     appVersion: app.getVersion(),
@@ -245,6 +277,23 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
   ipcMain.handle(IPC.searchStatus, (): Promise<YtDlpStatus> => ytdlp.status());
 
   ipcMain.handle(IPC.searchInstall, (): Promise<YtDlpStatus> => ytdlp.install());
+
+  // ── local alignment ──
+  ipcMain.handle(IPC.alignStart, (_e, videoId: unknown, source: unknown): AlignSnapshot => {
+    return align.start(assertVideoId(videoId), assertText(source, 'source', 64));
+  });
+
+  ipcMain.handle(IPC.alignCancel, (_e, videoId: unknown): AlignSnapshot => {
+    return align.cancel(assertVideoId(videoId));
+  });
+
+  ipcMain.handle(IPC.alignGet, (): AlignSnapshot => align.snapshot());
+
+  ipcMain.handle(IPC.uvStatus, (): Promise<UvStatus> => uv.status());
+
+  ipcMain.handle(IPC.uvInstall, (): Promise<UvStatus> => uv.install());
+
+  ipcMain.handle(IPC.envPrepare, (): Promise<UvStatus> => uv.prepareEnv());
 
   // ── TV mode ──
   ipcMain.handle(IPC.displaysList, (e): DisplayInfo[] => {

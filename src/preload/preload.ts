@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IPC,
+  type AlignSnapshot,
   type InstallProgress,
   type KaraokeApi,
   type QueueSnapshot,
@@ -48,6 +49,15 @@ const api: KaraokeApi = {
   searchStatus: () => ipcRenderer.invoke(IPC.searchStatus),
   searchInstall: () => ipcRenderer.invoke(IPC.searchInstall),
   onInstallProgress: (cb) => on<InstallProgress>(IPC.searchInstallProgress, cb),
+
+  alignStart: (videoId, source) => ipcRenderer.invoke(IPC.alignStart, videoId, source),
+  alignCancel: (videoId) => ipcRenderer.invoke(IPC.alignCancel, videoId),
+  alignGet: () => ipcRenderer.invoke(IPC.alignGet),
+  onAlignChanged: (cb) => on<AlignSnapshot>(IPC.alignChanged, cb),
+  uvStatus: () => ipcRenderer.invoke(IPC.uvStatus),
+  uvInstall: () => ipcRenderer.invoke(IPC.uvInstall),
+  envPrepare: () => ipcRenderer.invoke(IPC.envPrepare),
+  onEnvProgress: (cb) => on<InstallProgress>(IPC.envProgress, cb),
 
   displaysList: () => ipcRenderer.invoke(IPC.displaysList),
   getFullscreen: () => ipcRenderer.invoke(IPC.fullscreenGet),

@@ -1,15 +1,18 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { Readable, Transform } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import type { ReadableStream as WebReadableStream } from 'node:stream/web';
-import { app, net } from 'electron';
+import { app } from 'electron';
 import type { InstallProgress, SearchResult, YtDlpStatus } from '../shared/ipc';
 import { parseSearchJson } from '../shared/ytSearch';
-import { USER_AGENT } from './metadata';
 import type { SettingsStore } from './settings';
+import {
+  downloadFile,
+  errorMessage,
+  findOnPath,
+  isExecutable,
+  lastLine,
+  mb,
+  run,
+} from './tools';
 
 // yt-dlp is the search backend (SPEC.md §7): no API key, and when YouTube
 // changes something it is yt-dlp that gets fixed, not this app.
@@ -30,11 +33,6 @@ const SEARCH_TIMEOUT_MS = 30_000;
 const VERSION_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 const CACHE_TTL_MS = 10 * 60_000;
-const EXTRA_PATH_DIRS = [
-  '/opt/homebrew/bin',
-  '/usr/local/bin',
-  path.join(os.homedir(), '.local', 'bin'),
-];
 
 export class YtDlpMissingError extends Error {
   constructor() {
@@ -69,13 +67,8 @@ export class YtDlp {
     const custom = this.settings.get().ytdlp.path.trim();
     if (custom && isExecutable(custom)) return { path: custom, origin: 'settings' };
     if (isExecutable(this.managedExe)) return { path: this.managedExe, origin: 'managed' };
-    const dirs = [...(process.env['PATH'] ?? '').split(path.delimiter), ...EXTRA_PATH_DIRS];
-    for (const dir of dirs) {
-      if (!dir) continue;
-      const p = path.join(dir, 'yt-dlp');
-      if (isExecutable(p)) return { path: p, origin: 'path' };
-    }
-    return null;
+    const onPath = findOnPath('yt-dlp');
+    return onPath ? { path: onPath, origin: 'path' } : null;
   }
 
   async status(): Promise<YtDlpStatus> {
@@ -104,7 +97,7 @@ export class YtDlp {
         path: loc.path,
         version: null,
         origin: loc.origin,
-        error: `${loc.path} failed to run: ${message(err)}`,
+        error: `${loc.path} failed to run: ${errorMessage(err)}`,
       };
     }
   }
@@ -193,8 +186,8 @@ export class YtDlp {
       return this.status();
     } catch (err) {
       console.warn('[ytdlp] install failed:', err);
-      this.report('error', 0, message(err));
-      throw new Error(`yt-dlp download failed: ${message(err)}`);
+      this.report('error', 0, errorMessage(err));
+      throw new Error(`yt-dlp download failed: ${errorMessage(err)}`);
     } finally {
       await fs.promises.rm(zipPath, { force: true });
       await fs.promises.rm(unpackDir, { recursive: true, force: true });
@@ -202,31 +195,10 @@ export class YtDlp {
   }
 
   private async download(url: string, dest: string): Promise<void> {
-    const res = await net.fetch(url, {
-      headers: { 'User-Agent': USER_AGENT },
-      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    await downloadFile(url, dest, DOWNLOAD_TIMEOUT_MS, (pct, got, total) => {
+      const size = total ? `${mb(got)} / ${mb(total)} MB` : `${mb(got)} MB`;
+      this.report('download', pct, `Downloading yt-dlp… ${size}`);
     });
-    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} fetching ${url}`);
-    const total = Number(res.headers.get('content-length')) || 0;
-    let got = 0;
-    let lastPct = -1;
-    const counter = new Transform({
-      transform: (chunk: Buffer, _enc, cb) => {
-        got += chunk.length;
-        const pct = total ? Math.floor((got / total) * 100) : 0;
-        if (pct !== lastPct) {
-          lastPct = pct;
-          const size = total ? `${mb(got)} / ${mb(total)} MB` : `${mb(got)} MB`;
-          this.report('download', pct, `Downloading yt-dlp… ${size}`);
-        }
-        cb(null, chunk);
-      },
-    });
-    await pipeline(
-      Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>),
-      counter,
-      fs.createWriteStream(dest),
-    );
   }
 
   private report(phase: InstallProgress['phase'], percent: number, msg: string): void {
@@ -236,51 +208,6 @@ export class YtDlp {
 
 // ── helpers ──
 
-function isExecutable(p: string): boolean {
-  try {
-    fs.accessSync(p, fs.constants.X_OK);
-    return fs.statSync(p).isFile();
-  } catch {
-    return false;
-  }
-}
-
-function augmentedPath(): string {
-  const parts = (process.env['PATH'] ?? '').split(path.delimiter).filter(Boolean);
-  for (const d of EXTRA_PATH_DIRS) if (!parts.includes(d)) parts.push(d);
-  return parts.join(path.delimiter);
-}
-
-function run(
-  exe: string,
-  args: string[],
-  timeoutMs: number,
-): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      exe,
-      args,
-      {
-        timeout: timeoutMs,
-        killSignal: 'SIGKILL',
-        maxBuffer: 32 * 1024 * 1024,
-        encoding: 'utf8',
-        env: { ...process.env, PATH: augmentedPath() },
-      },
-      (err, stdout, stderr) => {
-        if (err) {
-          const detail = err.killed
-            ? `timed out after ${Math.round(timeoutMs / 1000)}s`
-            : lastLine(stderr) || err.message;
-          reject(new Error(detail));
-          return;
-        }
-        resolve({ stdout, stderr });
-      },
-    );
-  });
-}
-
 async function unzip(zip: string, dest: string): Promise<void> {
   // macOS ships ditto (keeps executable bits and the Python.framework symlinks).
   if (isExecutable('/usr/bin/ditto')) {
@@ -288,20 +215,4 @@ async function unzip(zip: string, dest: string): Promise<void> {
     return;
   }
   await run('unzip', ['-q', '-o', zip, '-d', dest], 120_000);
-}
-
-function lastLine(s: string): string {
-  const lines = s
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean);
-  return (lines[lines.length - 1] ?? '').replace(/^ERROR:\s*/, '');
-}
-
-function message(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-function mb(bytes: number): string {
-  return (bytes / 1024 / 1024).toFixed(0);
 }

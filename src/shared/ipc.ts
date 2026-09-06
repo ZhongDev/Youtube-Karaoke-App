@@ -90,11 +90,36 @@ export interface YtDlpSettings {
   path: string;
 }
 
+/** Whisper checkpoints offered for alignment (SPEC.md §5: large-v3 default, medium for speed). */
+export type WhisperModel = 'large-v3' | 'large-v3-turbo' | 'medium' | 'small';
+export const WHISPER_MODELS: readonly WhisperModel[] = [
+  'large-v3',
+  'large-v3-turbo',
+  'medium',
+  'small',
+];
+
+/** auto = Apple GPU (MPS) when available, falling back to CPU per stage. */
+export type AlignDevice = 'auto' | 'cpu';
+export const ALIGN_DEVICES: readonly AlignDevice[] = ['auto', 'cpu'];
+
+export interface AlignSettings {
+  model: WhisperModel;
+  device: AlignDevice;
+}
+
+export interface UvSettings {
+  /** Explicit uv executable; '' = auto (managed copy, then PATH). */
+  path: string;
+}
+
 export interface Settings {
   providers: Record<ProviderId, boolean>;
   ollama: OllamaSettings;
   display: DisplaySettings;
   ytdlp: YtDlpSettings;
+  align: AlignSettings;
+  uv: UvSettings;
 }
 
 /** Partial update; omitted fields keep their current value. */
@@ -103,6 +128,8 @@ export interface SettingsPatch {
   ollama?: Partial<OllamaSettings>;
   display?: Partial<DisplaySettings>;
   ytdlp?: Partial<YtDlpSettings>;
+  align?: Partial<AlignSettings>;
+  uv?: Partial<UvSettings>;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -110,6 +137,8 @@ export const DEFAULT_SETTINGS: Settings = {
   ollama: { enabled: false, endpoint: 'http://localhost:11434', model: 'llama3.1' },
   display: { lyricsMode: 'twoTrack', ruby: 'none' },
   ytdlp: { path: '' },
+  align: { model: 'large-v3', device: 'auto' },
+  uv: { path: '' },
 };
 
 /** Per-item lyric state shown as a badge in the queue (SPEC.md §7). */
@@ -175,10 +204,57 @@ export interface YtDlpStatus {
 }
 
 export interface InstallProgress {
-  phase: 'download' | 'unpack' | 'verify' | 'done' | 'error';
+  phase: 'download' | 'unpack' | 'verify' | 'sync' | 'done' | 'error';
   /** 0–100 within the phase (download only; others report 0 / 100). */
   percent: number;
   message: string;
+}
+
+// ── local alignment worker (SPEC.md §5 Tier 3, Phase 5) ──
+
+export type AlignStage =
+  | 'queued'
+  | 'setup' // uv / Python environment check
+  | 'download' // yt-dlp bestaudio
+  | 'decode' // ffmpeg → wav
+  | 'separate' // Demucs vocals
+  | 'load' // Whisper model load (first use downloads it)
+  | 'align' // stable-ts forced alignment
+  | 'done'
+  | 'error'
+  | 'cancelled';
+
+export interface AlignJob {
+  videoId: string;
+  /** Song label for status displays. */
+  title: string;
+  /** Lyrics source whose text was the alignment reference. */
+  source: string;
+  model: WhisperModel;
+  stage: AlignStage;
+  percent: number;
+  message: string;
+  error: string | null;
+  warnings: string[];
+  startedAt: number;
+  finishedAt: number | null;
+}
+
+/** All jobs of this session, newest first. */
+export interface AlignSnapshot {
+  jobs: AlignJob[];
+}
+
+export interface UvStatus {
+  available: boolean;
+  path: string | null;
+  version: string | null;
+  origin: 'settings' | 'managed' | 'path' | null;
+  managedDir: string;
+  /** The worker's Python environment matches worker/uv.lock. */
+  envReady: boolean;
+  envDir: string;
+  error: string | null;
 }
 
 /** The "Artist - Topic" upload proposed for an embed-blocked / drifting video. */
@@ -228,6 +304,16 @@ export const IPC = {
   searchInstall: 'search:install',
   /** main → renderer push, payload: InstallProgress */
   searchInstallProgress: 'search:install-progress',
+  alignStart: 'align:start',
+  alignCancel: 'align:cancel',
+  alignGet: 'align:get',
+  /** main → renderer push, payload: AlignSnapshot */
+  alignChanged: 'align:changed',
+  uvStatus: 'align:uv-status',
+  uvInstall: 'align:uv-install',
+  envPrepare: 'align:env-prepare',
+  /** main → renderer push, payload: InstallProgress */
+  envProgress: 'align:env-progress',
   displaysList: 'window:displays',
   fullscreenGet: 'window:get-fullscreen',
   fullscreenSet: 'window:set-fullscreen',
@@ -301,6 +387,22 @@ export interface KaraokeApi {
   /** Download the official macOS build into the app's data folder. */
   searchInstall(): Promise<YtDlpStatus>;
   onInstallProgress(cb: (p: InstallProgress) => void): () => void;
+
+  // ── local alignment (background job; playback stays usable) ──
+  /**
+   * Queue a forced-alignment job using the text of lyrics `source` as the
+   * reference. The result is stored as source 'aligned' (kind synced_word).
+   */
+  alignStart(videoId: string, source: string): Promise<AlignSnapshot>;
+  alignCancel(videoId: string): Promise<AlignSnapshot>;
+  alignGet(): Promise<AlignSnapshot>;
+  onAlignChanged(cb: (s: AlignSnapshot) => void): () => void;
+  uvStatus(): Promise<UvStatus>;
+  /** Download the official uv build into the app's data folder. */
+  uvInstall(): Promise<UvStatus>;
+  /** `uv sync` the worker environment (torch, Demucs, Whisper — hundreds of MB). */
+  envPrepare(): Promise<UvStatus>;
+  onEnvProgress(cb: (p: InstallProgress) => void): () => void;
 
   // ── TV mode (fullscreen, optionally on a chosen display) ──
   displaysList(): Promise<DisplayInfo[]>;
