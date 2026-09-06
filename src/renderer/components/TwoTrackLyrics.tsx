@@ -22,6 +22,28 @@ import { annotate, type RubySegment } from '../ruby';
 /** How far the base layer's cut-off trails the highlight's leading edge. */
 const WIPE_OVERLAP_MS = 80;
 
+/**
+ * clip-path inset() clips to the element's line box, but glyph ink is not
+ * confined to it: descenders (g, y, j) and the 0.1em outer stroke paint past
+ * its bottom, top and side edges. Every clip edge except the moving wipe
+ * edge therefore sits this far OUTSIDE the box.
+ */
+const INK_BLEED = '0.3em';
+
+/** Highlight layer: revealed from the left up to `progress` (0..1). */
+function highlightClip(progress: number): string {
+  if (progress <= 0) return 'inset(0 100% 0 0)'; // empty region: no ink at all
+  if (progress >= 1) return ''; // unclipped: full stroke on every side
+  return `inset(-${INK_BLEED} ${((1 - progress) * 100).toFixed(2)}% -${INK_BLEED} -${INK_BLEED})`;
+}
+
+/** Base layer: hidden from the left up to `trailing` (0..1). */
+function baseClip(trailing: number): string {
+  if (trailing <= 0) return '';
+  if (trailing >= 1) return 'inset(0 0 0 100%)'; // empty region
+  return `inset(-${INK_BLEED} -${INK_BLEED} -${INK_BLEED} ${(trailing * 100).toFixed(2)}%)`;
+}
+
 interface Props {
   parsed: ParsedLrc;
   clock: SyncClock;
@@ -58,10 +80,11 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
         // until then there is nothing to style.
         if (el && st && idx !== null && el.dataset['index'] === String(idx)) {
           el.style.opacity = st.opacity.toFixed(3);
-          if (hl) hl.style.clipPath = `inset(0 ${((1 - st.progress) * 100).toFixed(2)}% 0 0)`;
+          if (hl) hl.style.clipPath = highlightClip(st.progress);
           if (base) {
-            const trailing = wipeProgress(parsed.lines[idx]!, st.entry, tMs - WIPE_OVERLAP_MS);
-            base.style.clipPath = trailing > 0 ? `inset(0 0 0 ${(trailing * 100).toFixed(2)}%)` : '';
+            base.style.clipPath = baseClip(
+              wipeProgress(parsed.lines[idx]!, st.entry, tMs - WIPE_OVERLAP_MS),
+            );
           }
         }
       }
