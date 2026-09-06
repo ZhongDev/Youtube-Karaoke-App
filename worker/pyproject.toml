@@ -1,0 +1,22 @@
+[project]
+name = "karaoke-align"
+version = "0.1.0"
+description = "Local forced-alignment worker: yt-dlp audio → Demucs vocals → stable-ts alignment → enhanced LRC"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  # Pinned to the last torch line whose torchaudio still ships its own
+  # soundfile-backed I/O; 2.9 moved load/save to torchcodec (needs ffmpeg libs).
+  "torch==2.7.*",
+  "torchaudio==2.7.*",
+  "demucs>=4.0.1",
+  "stable-ts>=2.19",
+  "openai-whisper>=20250625",
+  "soundfile>=0.13",
+  # Static ffmpeg binary wheel (macOS arm64 included) so nothing has to be
+  # installed system-wide for decoding YouTube's webm/m4a audio.
+  "imageio-ffmpeg>=0.6",
+  "numpy",
+]
+
+[tool.uv]
+package = false

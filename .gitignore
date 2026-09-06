@@ -140,3 +140,8 @@ dist
 
 # Electron app data (dev)
 .DS_Store
+
+# Local alignment worker: env lives in userData (UV_PROJECT_ENVIRONMENT); never here
+worker/.venv/
+worker/align-work/
+worker/__pycache__/

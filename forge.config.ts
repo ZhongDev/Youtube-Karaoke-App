@@ -31,6 +31,9 @@ function collectProdDeps(name: string, fromDir: string, out: Map<string, string>
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
+    // The Python alignment worker (pyproject, uv.lock, align.py) ships beside
+    // the asar; its venv is created under userData at first use (uv.ts).
+    extraResource: ['worker'],
   },
   rebuildConfig: {},
   hooks: {
