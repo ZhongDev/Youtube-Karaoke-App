@@ -250,6 +250,22 @@ export default function App() {
     };
   }, [tv]);
 
+  // Clicking the embed moves keyboard focus INTO the cross-origin YouTube
+  // iframe, where the window-level hotkeys below never see key events. The
+  // parent window receives a `blur` when that happens — pull focus straight
+  // back out. Clicks on the YouTube controls still work (they don't need
+  // focus), and Space / [ ] / t / Esc keep working from the parent document.
+  useEffect(() => {
+    const onBlur = () => {
+      setTimeout(() => {
+        const el = document.activeElement;
+        if (el instanceof HTMLIFrameElement) el.blur();
+      }, 0);
+    };
+    window.addEventListener('blur', onBlur);
+    return () => window.removeEventListener('blur', onBlur);
+  }, []);
+
   // Hotkeys: Space play/pause; [ / ] nudge offset ∓100ms, Shift ∓500ms, \ resets;
   // i = lyrics inspector; t = TV mode (Esc leaves it). All off while a modal
   // is open (Esc closes it) or while typing in a text field.
