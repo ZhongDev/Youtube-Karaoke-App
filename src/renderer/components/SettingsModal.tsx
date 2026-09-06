@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  ALIGN_DEVICES,
   PROVIDER_IDS,
+  WHISPER_MODELS,
+  type AlignDevice,
   type AppInfo,
   type InstallProgress,
   type LyricsMode,
@@ -8,6 +11,8 @@ import {
   type RubyMode,
   type Settings,
   type SettingsPatch,
+  type UvStatus,
+  type WhisperModel,
   type YtDlpStatus,
 } from '../../shared/ipc';
 import { ipcErrorMessage } from '../ipcError';
@@ -51,6 +56,18 @@ const ORIGIN_LABEL: Record<NonNullable<YtDlpStatus['origin']>, string> = {
   settings: 'custom path',
   managed: 'app-managed copy',
   path: 'found on PATH',
+};
+
+const WHISPER_HINT: Record<WhisperModel, string> = {
+  'large-v3': 'best quality, ~3 GB download, slowest',
+  'large-v3-turbo': 'near large-v3 quality, ~1.6 GB, faster',
+  medium: 'good, ~1.5 GB, faster',
+  small: 'rough, ~0.5 GB, fastest',
+};
+
+const DEVICE_LABEL: Record<AlignDevice, string> = {
+  auto: 'Auto — Demucs on the Apple GPU, Whisper on CPU',
+  cpu: 'CPU only',
 };
 
 export default function SettingsModal({ appInfo, settings, onSave, onClose }: Props) {
@@ -199,6 +216,8 @@ export default function SettingsModal({ appInfo, settings, onSave, onClose }: Pr
 
         <YtDlpSection settings={settings} save={save} />
 
+        <AlignSettingsSection settings={settings} save={save} />
+
         <section>
           <h3>Cache</h3>
           <p className="muted">
@@ -299,6 +318,139 @@ function YtDlpSection({
           <input
             value={path}
             placeholder="/opt/homebrew/bin/yt-dlp"
+            onChange={(e) => setPath(e.target.value)}
+            onBlur={savePath}
+            onKeyDown={(e) => e.key === 'Enter' && savePath()}
+            spellCheck={false}
+          />
+        </label>
+      </div>
+    </section>
+  );
+}
+
+/** Local alignment: uv + Python environment setup, Whisper model, device. */
+function AlignSettingsSection({
+  settings,
+  save,
+}: {
+  settings: Settings;
+  save(patch: SettingsPatch): void;
+}) {
+  const [status, setStatus] = useState<UvStatus | null>(null);
+  const [path, setPath] = useState(settings.uv.path);
+  const [progress, setProgress] = useState<InstallProgress | null>(null);
+  const [busy, setBusy] = useState<'uv' | 'env' | null>(null);
+
+  const refresh = useCallback(() => {
+    window.karaoke.uvStatus().then(setStatus).catch(console.error);
+  }, []);
+  useEffect(refresh, [refresh, settings.uv.path]);
+  useEffect(() => window.karaoke.onEnvProgress(setProgress), []);
+
+  const runTask = (which: 'uv' | 'env', op: () => Promise<UvStatus>) => {
+    setBusy(which);
+    setProgress(null);
+    op()
+      .then(setStatus)
+      .catch((err: unknown) =>
+        setProgress({ phase: 'error', percent: 0, message: ipcErrorMessage(err) }),
+      )
+      .finally(() => setBusy(null));
+  };
+
+  const savePath = () => {
+    if (path.trim() !== settings.uv.path) save({ uv: { path: path.trim() } });
+  };
+
+  const uvLine = !status
+    ? '…'
+    : status.available
+      ? `✓ uv ${status.version} · ${status.origin ? ORIGIN_LABEL[status.origin] : ''}`
+      : `✗ ${status.error ?? 'uv not available'}`;
+  const envLine = !status
+    ? ''
+    : status.envReady
+      ? '✓ Python environment ready (torch, Demucs, Whisper)'
+      : '○ Python environment not prepared — the first alignment job does it, or prepare it now';
+
+  return (
+    <section>
+      <h3>Local alignment (Phase 5)</h3>
+      <p className="muted">
+        “Align lyrics” in the lyrics inspector builds word-synced lyrics on this Mac with a
+        Python worker: yt-dlp audio → Demucs vocals → Whisper forced alignment. The worker’s
+        Python and packages are managed by <b>uv</b> in the app’s data folder; Whisper model
+        weights download into ~/.cache/whisper on first use.
+      </p>
+      <div className={`ytdlp-status ${status && !status.available ? 'bad' : ''}`}>
+        <span>{uvLine}</span>
+        {status?.path && <span className="muted ytdlp-path">{status.path}</span>}
+        {envLine && <span className={status?.envReady ? '' : 'muted'}>{envLine}</span>}
+        {status && <span className="muted ytdlp-path">{status.envDir}</span>}
+      </div>
+      <div className="insp-actions">
+        <button
+          className="url-load"
+          disabled={busy !== null}
+          onClick={() => runTask('uv', () => window.karaoke.uvInstall())}
+        >
+          {busy === 'uv'
+            ? 'Working…'
+            : status?.origin === 'managed'
+              ? 'Update app-managed uv'
+              : 'Download app-managed uv'}
+        </button>
+        <button
+          className="url-load"
+          disabled={busy !== null || !status?.available}
+          onClick={() => runTask('env', () => window.karaoke.envPrepare())}
+        >
+          {busy === 'env' ? 'Preparing…' : status?.envReady ? 'Re-sync environment' : 'Prepare Python environment (~600 MB)'}
+        </button>
+      </div>
+      {progress && (
+        <div className={`ytdlp-progress ${progress.phase === 'error' ? 'bad' : ''}`}>
+          <div>{progress.message}</div>
+          {progress.phase !== 'error' && progress.phase !== 'done' && progress.phase !== 'sync' && (
+            <div className="progress">
+              <i style={{ width: `${progress.percent}%` }} />
+            </div>
+          )}
+        </div>
+      )}
+      <div className="insp-meta">
+        <label className="field">
+          <span>Whisper model</span>
+          <select
+            value={settings.align.model}
+            onChange={(e) => save({ align: { model: e.target.value as WhisperModel } })}
+          >
+            {WHISPER_MODELS.map((m) => (
+              <option key={m} value={m}>
+                {m} — {WHISPER_HINT[m]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Compute device</span>
+          <select
+            value={settings.align.device}
+            onChange={(e) => save({ align: { device: e.target.value as AlignDevice } })}
+          >
+            {ALIGN_DEVICES.map((d) => (
+              <option key={d} value={d}>
+                {DEVICE_LABEL[d]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Custom uv path (blank = automatic)</span>
+          <input
+            value={path}
+            placeholder="/opt/homebrew/bin/uv"
             onChange={(e) => setPath(e.target.value)}
             onBlur={savePath}
             onKeyDown={(e) => e.key === 'Enter' && savePath()}

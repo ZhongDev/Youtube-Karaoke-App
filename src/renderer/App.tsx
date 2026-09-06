@@ -16,6 +16,7 @@ import SearchBar from './components/SearchBar';
 import SettingsModal from './components/SettingsModal';
 import TvButton from './components/TvButton';
 import { ipcErrorMessage } from './ipcError';
+import { isAlignActive, overallPercent, useAlign } from './useAlign';
 import { useQueue } from './useQueue';
 import { useSettings } from './useSettings';
 import { formatDuration, formatTime } from './youtube';
@@ -306,6 +307,17 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [videoId, setFullscreen]);
 
+  // Background alignment jobs (Phase 5): a finished job for the playing song
+  // re-resolves it so the new word-synced document takes over live.
+  const align = useAlign();
+  const activeJob = align.jobs.find((j) => isAlignActive(j.stage)) ?? null;
+  const currentJob = videoId ? (align.jobs.find((j) => j.videoId === videoId) ?? null) : null;
+  const currentJobDoneAt = currentJob?.stage === 'done' ? currentJob.finishedAt : null;
+  useEffect(() => {
+    if (!currentJobDoneAt || !videoId || !playKey) return;
+    resolve(videoId, playKey);
+  }, [currentJobDoneAt, videoId, playKey, resolve]);
+
   const parsed = useMemo(() => {
     const doc = result?.lyrics;
     if (!doc || doc.kind === 'plain') return null;
@@ -541,6 +553,9 @@ export default function App() {
           title={current.title}
           status={lyricsStatus}
           result={result}
+          job={currentJob}
+          settings={settings}
+          onSaveSettings={updateSettings}
           onResult={adoptResult}
           onClose={() => setInspectorOpen(false)}
         />
@@ -574,6 +589,14 @@ export default function App() {
           </button>
         )}
         {loadError && <span className="warning-chip">⚠ {loadError}</span>}
+        {activeJob && (
+          <span
+            className="align-chip"
+            title={`Aligning “${activeJob.title}” from ${activeJob.source} with Whisper ${activeJob.model}`}
+          >
+            ⚙ {overallPercent(activeJob)}% · {activeJob.message}
+          </span>
+        )}
         <span className="muted spacer" />
         <span className="muted">
           {appInfo ? `db v${appInfo.schemaVersion} · ${appInfo.dbPath}` : ''}
