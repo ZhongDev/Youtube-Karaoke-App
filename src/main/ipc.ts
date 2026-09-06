@@ -6,13 +6,17 @@ import {
   PROVIDER_IDS,
   RUBY_MODES,
   type AppInfo,
+  type DisplayInfo,
   type LyricsMode,
   type QueueAddMode,
   type QueueSnapshot,
   type ResolveResult,
   type RubyMode,
+  type SearchResult,
   type Settings,
   type SettingsPatch,
+  type TopicSuggestion,
+  type YtDlpStatus,
 } from '../shared/ipc';
 import { extractVideoId } from '../shared/youtubeUrl';
 import { schemaVersion } from './db';
@@ -20,6 +24,9 @@ import { LyricsService } from './lyricsService';
 import { QueueService } from './queueService';
 import { Repo } from './repo';
 import { SettingsStore } from './settings';
+import { TopicSuggester } from './topicSuggest';
+import { listDisplays, setFullscreen } from './window';
+import { YtDlp } from './ytdlp';
 
 const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 
@@ -38,6 +45,11 @@ function assertInt(n: unknown, what: string): number {
 function assertText(v: unknown, what: string, maxLen: number): string {
   if (typeof v !== 'string' || v.length > maxLen) throw new Error(`Invalid ${what}`);
   return v;
+}
+
+/** Optional positive duration in seconds; anything else → undefined. */
+function optDuration(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
 }
 
 /** Keep only well-typed, known keys of a settings patch from the renderer. */
@@ -71,19 +83,31 @@ function sanitizeSettingsPatch(raw: unknown): SettingsPatch {
       patch.display.ruby = d['ruby'] as RubyMode;
     }
   }
+  if (r['ytdlp'] && typeof r['ytdlp'] === 'object') {
+    const y = r['ytdlp'] as Record<string, unknown>;
+    if (typeof y['path'] === 'string' && y['path'].length <= 1000) {
+      patch.ytdlp = { path: y['path'] };
+    }
+  }
   return patch;
+}
+
+function broadcast(channel: string, payload: unknown): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send(channel, payload);
+  }
 }
 
 export function registerIpcHandlers(db: Database.Database, dbPath: string): void {
   const repo = new Repo(db);
   const settings = new SettingsStore(db);
   const lyrics = new LyricsService(repo, settings);
-  const queue = new QueueService(repo, lyrics, (snapshot: QueueSnapshot) => {
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (!w.isDestroyed()) w.webContents.send(IPC.queueChanged, snapshot);
-    }
-  });
+  const queue = new QueueService(repo, lyrics, (snapshot: QueueSnapshot) =>
+    broadcast(IPC.queueChanged, snapshot),
+  );
   queue.init();
+  const ytdlp = new YtDlp(settings, (p) => broadcast(IPC.searchInstallProgress, p));
+  const topics = new TopicSuggester(repo, ytdlp);
 
   ipcMain.handle(IPC.getAppInfo, (): AppInfo => ({
     appVersion: app.getVersion(),
@@ -95,11 +119,7 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
     IPC.resolveVideo,
     async (_e, input: unknown, durationS: unknown): Promise<ResolveResult> => {
       if (typeof input !== 'string') throw new Error('Invalid input');
-      const dur =
-        typeof durationS === 'number' && Number.isFinite(durationS) && durationS > 0
-          ? durationS
-          : undefined;
-      const result = await lyrics.resolve(input, dur);
+      const result = await lyrics.resolve(input, optDuration(durationS));
       // The playing song's with-duration re-resolve may have found lyrics the
       // prefetch missed — keep the queue badge in step.
       if (!result.fromCache) queue.refresh(extractVideoId(input) ?? undefined);
@@ -120,14 +140,30 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
     queue.refresh();
   });
 
+  ipcMain.handle(
+    IPC.suggestTopic,
+    (_e, videoId: unknown): Promise<TopicSuggestion | null> =>
+      topics.suggest(assertVideoId(videoId)),
+  );
+
   // ── queue ──
   ipcMain.handle(IPC.queueGet, (): QueueSnapshot => queue.snapshot());
 
-  ipcMain.handle(IPC.queueAdd, (_e, input: unknown, mode: unknown): number => {
-    if (typeof input !== 'string') throw new Error('Invalid input');
-    const m: QueueAddMode = mode === 'next' ? 'next' : 'end';
-    return queue.add(input, m);
-  });
+  ipcMain.handle(
+    IPC.queueAdd,
+    (_e, input: unknown, mode: unknown, durationS: unknown): number => {
+      if (typeof input !== 'string') throw new Error('Invalid input');
+      const m: QueueAddMode = mode === 'next' ? 'next' : 'end';
+      return queue.add(input, m, optDuration(durationS));
+    },
+  );
+
+  ipcMain.handle(
+    IPC.queueReplace,
+    (_e, id: unknown, videoId: unknown, durationS: unknown): void => {
+      queue.replace(assertInt(id, 'queue id'), assertVideoId(videoId), optDuration(durationS));
+    },
+  );
 
   ipcMain.handle(IPC.queueRemove, (_e, id: unknown): void => {
     queue.remove(assertInt(id, 'queue id'));
@@ -193,4 +229,42 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
     console.log('[settings] updated:', JSON.stringify(s));
     return s;
   });
+
+  // ── search (yt-dlp) ──
+  ipcMain.handle(IPC.search, async (_e, query: unknown): Promise<SearchResult[]> => {
+    const q = assertText(query, 'query', 200).trim();
+    if (!q) return [];
+    const results = await ytdlp.search(q);
+    // Flag uploads that blocked embedding on an earlier attempt.
+    return results.map((r) => ({
+      ...r,
+      embeddable: repo.getTrack(r.videoId)?.embeddable !== 0,
+    }));
+  });
+
+  ipcMain.handle(IPC.searchStatus, (): Promise<YtDlpStatus> => ytdlp.status());
+
+  ipcMain.handle(IPC.searchInstall, (): Promise<YtDlpStatus> => ytdlp.install());
+
+  // ── TV mode ──
+  ipcMain.handle(IPC.displaysList, (e): DisplayInfo[] => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    return win ? listDisplays(win) : [];
+  });
+
+  ipcMain.handle(
+    IPC.fullscreenGet,
+    (e): boolean => BrowserWindow.fromWebContents(e.sender)?.isFullScreen() ?? false,
+  );
+
+  ipcMain.handle(
+    IPC.fullscreenSet,
+    async (e, on: unknown, displayId: unknown): Promise<void> => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (!win) return;
+      if (typeof on !== 'boolean') throw new Error('Invalid fullscreen flag');
+      const d = typeof displayId === 'number' && Number.isInteger(displayId) ? displayId : undefined;
+      await setFullscreen(win, on, d);
+    },
+  );
 }

@@ -272,6 +272,11 @@ export class Repo {
     })();
   }
 
+  /** Point an existing queue row at another video (same position, same id). */
+  setQueueVideo(id: number, videoId: string): void {
+    this.db.prepare('UPDATE queue SET video_id = ? WHERE id = ?').run(videoId, id);
+  }
+
   deleteQueueItem(id: number): void {
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM queue WHERE id = ?').run(id);

@@ -12,12 +12,14 @@ import type { Repo, QueueRow } from './repo';
 // LyricsService (cache-first, so a known song costs no network) so the
 // per-item badge is meaningful before the song comes up. Prefetches run one
 // at a time to stay a polite LRCLIB client when a batch of URLs is pasted.
+// A duration known up front (search results carry one) is passed along so
+// the prefetch can already match on length.
 
 export class QueueService {
   private rev = 0;
   /** Transient per-video state not derivable from the DB. */
   private status = new Map<string, 'fetching' | 'error'>();
-  private pending: string[] = [];
+  private pending: { videoId: string; durationS: number | undefined }[] = [];
   private working = false;
 
   constructor(
@@ -37,15 +39,24 @@ export class QueueService {
     return { rev: this.rev, items: this.repo.listQueue().map((r) => this.toItem(r)) };
   }
 
-  add(input: string, mode: QueueAddMode): number {
+  add(input: string, mode: QueueAddMode, durationS?: number): number {
     const videoId = extractVideoId(input);
     if (!videoId) throw new Error('Not a YouTube URL or video id');
     const index = insertIndexFor(this.repo.queueIds().length, mode);
     const id = this.repo.insertQueueItem(videoId, index);
     console.log(`[queue] add ${videoId} as #${id} at ${index} (${mode})`);
     this.broadcast();
-    this.prefetch(videoId);
+    this.prefetch(videoId, durationS);
     return id;
+  }
+
+  /** Swap the video of an existing item in place (Topic-upload suggestion). */
+  replace(id: number, videoId: string, durationS?: number): void {
+    if (!this.repo.queueIds().includes(id)) throw new Error('Queue item no longer exists');
+    console.log(`[queue] replace #${id} → ${videoId}`);
+    this.repo.setQueueVideo(id, videoId);
+    this.broadcast();
+    this.prefetch(videoId, durationS);
   }
 
   remove(id: number): void {
@@ -90,10 +101,10 @@ export class QueueService {
     this.broadcast();
   }
 
-  private prefetch(videoId: string): void {
+  private prefetch(videoId: string, durationS?: number): void {
     if (this.status.get(videoId) === 'fetching') return;
     this.status.set(videoId, 'fetching');
-    this.pending.push(videoId);
+    this.pending.push({ videoId, durationS });
     this.broadcast();
     void this.drain();
   }
@@ -102,10 +113,11 @@ export class QueueService {
     if (this.working) return;
     this.working = true;
     try {
-      let videoId: string | undefined;
-      while ((videoId = this.pending.shift()) !== undefined) {
+      let job: { videoId: string; durationS: number | undefined } | undefined;
+      while ((job = this.pending.shift()) !== undefined) {
+        const { videoId, durationS } = job;
         try {
-          await this.lyrics.resolve(videoId);
+          await this.lyrics.resolve(videoId, durationS);
           this.status.delete(videoId);
         } catch (err) {
           console.warn(`[queue] prefetch failed for ${videoId}:`, err);
