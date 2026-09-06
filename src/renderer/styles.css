@@ -837,12 +837,15 @@ body {
   will-change: opacity;
 }
 
-.twotrack.has-ruby .tt-line {
-  padding-top: 0.55em;
-}
-
 .tt-text {
   display: block;
+}
+
+/* Room for the reading above the text. On the text layers, not the line:
+   the highlight layer is absolutely positioned over the line's padding box,
+   so padding on the line would lift it a ruby-height above the base. */
+.twotrack.has-ruby .tt-text {
+  padding-top: 0.55em;
 }
 
 /* Base: bold white with a black outer stroke … */
