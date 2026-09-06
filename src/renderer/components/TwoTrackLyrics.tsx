@@ -2,13 +2,25 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject }
 import type { RubyMode } from '../../shared/ipc';
 import type { ParsedLrc } from '../../shared/lrc';
 import type { SyncClock } from '../../shared/syncClock';
-import { laneStateAt, scheduleTwoTrack } from '../../shared/twoTrack';
+import { laneStateAt, scheduleTwoTrack, wipeProgress } from '../../shared/twoTrack';
 import { annotate, type RubySegment } from '../ruby';
 
 // Joysound-style two-lane display (see shared/twoTrack.ts for the timing
 // model). Per frame we read the clock, ask the schedule what each lane shows,
 // and poke opacity / wipe clip straight into the DOM — React only re-renders
 // when a lane switches to a different line.
+//
+// The wipe is two clip-paths, not one: the highlight layer is revealed from
+// the left up to the sung position, and the base layer underneath is hidden
+// from the left up to where the wipe was WIPE_OVERLAP_MS ago. The highlight
+// gets its own compositor layer (its clip changes every frame) and can land a
+// fraction of a pixel off the base, which let the base's black outline peek
+// out around already-sung glyphs; with no base drawn under the sung part
+// there is nothing to peek. The time lag keeps the two edges overlapping, so
+// no gap can open between them either.
+
+/** How far the base layer's cut-off trails the highlight's leading edge. */
+const WIPE_OVERLAP_MS = 80;
 
 interface Props {
   parsed: ParsedLrc;
@@ -23,6 +35,7 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
   const schedule = useMemo(() => scheduleTwoTrack(parsed.lines), [parsed]);
   const [slots, setSlots] = useState<Slots>([null, null]);
   const lineEls = useRef<[HTMLDivElement | null, HTMLDivElement | null]>([null, null]);
+  const baseEls = useRef<[HTMLSpanElement | null, HTMLSpanElement | null]>([null, null]);
   const hlEls = useRef<[HTMLSpanElement | null, HTMLSpanElement | null]>([null, null]);
 
   useEffect(() => {
@@ -39,12 +52,17 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
           changed = true;
         }
         const el = lineEls.current[lane];
+        const base = baseEls.current[lane];
         const hl = hlEls.current[lane];
         // The element for a freshly assigned line mounts on the next render;
         // until then there is nothing to style.
-        if (el && st && el.dataset['index'] === String(idx)) {
+        if (el && st && idx !== null && el.dataset['index'] === String(idx)) {
           el.style.opacity = st.opacity.toFixed(3);
           if (hl) hl.style.clipPath = `inset(0 ${((1 - st.progress) * 100).toFixed(2)}% 0 0)`;
+          if (base) {
+            const trailing = wipeProgress(parsed.lines[idx]!, st.entry, tMs - WIPE_OVERLAP_MS);
+            base.style.clipPath = trailing > 0 ? `inset(0 0 0 ${(trailing * 100).toFixed(2)}%)` : '';
+          }
         }
       }
       if (changed) setSlots([shown[0], shown[1]]);
@@ -87,7 +105,12 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
                   lineEls.current[lane] = el;
                 }}
               >
-                <span className="tt-text base">
+                <span
+                  className="tt-text base"
+                  ref={(el) => {
+                    baseEls.current[lane] = el;
+                  }}
+                >
                   <Segments segments={annotate(line.text, ruby)} />
                 </span>
                 <span
