@@ -48,6 +48,12 @@ export interface ResolveResult {
   offsetMs: number;
   fromCache: boolean;
   warning: string | null;
+  /**
+   * video length − lyrics recording length, in seconds, when it exceeds the
+   * SPEC.md §8 drift threshold (3 s); null otherwise. The UI offers the
+   * "Artist - Topic" upload in that case.
+   */
+  driftS: number | null;
 }
 
 // ── settings (SPEC.md §7) ──
@@ -79,10 +85,16 @@ export interface DisplaySettings {
   ruby: RubyMode;
 }
 
+export interface YtDlpSettings {
+  /** Explicit yt-dlp executable; '' = auto (managed copy, then PATH). */
+  path: string;
+}
+
 export interface Settings {
   providers: Record<ProviderId, boolean>;
   ollama: OllamaSettings;
   display: DisplaySettings;
+  ytdlp: YtDlpSettings;
 }
 
 /** Partial update; omitted fields keep their current value. */
@@ -90,12 +102,14 @@ export interface SettingsPatch {
   providers?: Partial<Record<ProviderId, boolean>>;
   ollama?: Partial<OllamaSettings>;
   display?: Partial<DisplaySettings>;
+  ytdlp?: Partial<YtDlpSettings>;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   providers: { lrclib: true, netease: true },
   ollama: { enabled: false, endpoint: 'http://localhost:11434', model: 'llama3.1' },
   display: { lyricsMode: 'twoTrack', ruby: 'none' },
+  ytdlp: { path: '' },
 };
 
 /** Per-item lyric state shown as a badge in the queue (SPEC.md §7). */
@@ -134,13 +148,68 @@ export interface QueueSnapshot {
 
 export type QueueAddMode = 'end' | 'next';
 
+// ── search & Topic suggestion (SPEC.md §7, Phase 4) ──
+
+/** One `yt-dlp ytsearch` hit. */
+export interface SearchResult {
+  videoId: string;
+  title: string;
+  channel: string;
+  durationS: number | null;
+  /** Auto-generated "Artist - Topic" upload: studio audio, syncs best. */
+  isTopic: boolean;
+  viewCount: number | null;
+  /** false = an earlier play attempt found this upload blocks embedding. */
+  embeddable: boolean;
+}
+
+export interface YtDlpStatus {
+  available: boolean;
+  /** Executable in use (or the one that failed), null when none was found. */
+  path: string | null;
+  version: string | null;
+  origin: 'settings' | 'managed' | 'path' | null;
+  /** Where the app keeps its own copy (the Download button writes here). */
+  managedDir: string;
+  error: string | null;
+}
+
+export interface InstallProgress {
+  phase: 'download' | 'unpack' | 'verify' | 'done' | 'error';
+  /** 0–100 within the phase (download only; others report 0 / 100). */
+  percent: number;
+  message: string;
+}
+
+/** The "Artist - Topic" upload proposed for an embed-blocked / drifting video. */
+export interface TopicSuggestion {
+  videoId: string;
+  title: string;
+  channel: string;
+  durationS: number | null;
+}
+
+// ── TV mode (SPEC.md §7) ──
+
+export interface DisplayInfo {
+  id: number;
+  label: string;
+  width: number;
+  height: number;
+  primary: boolean;
+  /** The display the app window is on right now. */
+  current: boolean;
+}
+
 export const IPC = {
   getAppInfo: 'app:get-info',
   resolveVideo: 'video:resolve',
   setOffset: 'video:set-offset',
   markEmbedBlocked: 'video:mark-embed-blocked',
+  suggestTopic: 'video:suggest-topic',
   queueGet: 'queue:get',
   queueAdd: 'queue:add',
+  queueReplace: 'queue:replace',
   queueRemove: 'queue:remove',
   queueMove: 'queue:move',
   queuePlay: 'queue:play',
@@ -154,6 +223,16 @@ export const IPC = {
   lyricsRefetch: 'lyrics:refetch',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  search: 'search:run',
+  searchStatus: 'search:status',
+  searchInstall: 'search:install',
+  /** main → renderer push, payload: InstallProgress */
+  searchInstallProgress: 'search:install-progress',
+  displaysList: 'window:displays',
+  fullscreenGet: 'window:get-fullscreen',
+  fullscreenSet: 'window:set-fullscreen',
+  /** main → renderer push, payload: boolean */
+  fullscreenChanged: 'window:fullscreen-changed',
 } as const;
 
 /** The API exposed on `window.karaoke` by the preload script. */
@@ -168,11 +247,23 @@ export interface KaraokeApi {
   resolveVideo(input: string, durationS?: number): Promise<ResolveResult>;
   setOffset(videoId: string, offsetMs: number): Promise<void>;
   markEmbedBlocked(videoId: string): Promise<void>;
+  /**
+   * Find the auto-generated "Artist - Topic" upload of this video's song
+   * (via yt-dlp search). null when none is convincing, yt-dlp is missing, or
+   * the video already is one. Cached per video for the session.
+   */
+  suggestTopic(videoId: string): Promise<TopicSuggestion | null>;
 
   // ── queue (persisted in SQLite; main is the source of truth) ──
   queueGet(): Promise<QueueSnapshot>;
-  /** URL or id → new queue item id. Metadata + lyrics prefetch start at once. */
-  queueAdd(input: string, mode: QueueAddMode): Promise<number>;
+  /**
+   * URL or id → new queue item id. Metadata + lyrics prefetch start at once.
+   * `durationS` (known from a search result) lets the prefetch match the
+   * provider duration before the player has ever loaded the video.
+   */
+  queueAdd(input: string, mode: QueueAddMode, durationS?: number): Promise<number>;
+  /** Swap the video of an existing item in place (Topic-upload suggestion). */
+  queueReplace(id: number, videoId: string, durationS?: number): Promise<void>;
   queueRemove(id: number): Promise<void>;
   /** Reorder: `toIndex` is the item's final index (0 is pinned, see queueLogic). */
   queueMove(id: number, toIndex: number): Promise<void>;
@@ -202,6 +293,20 @@ export interface KaraokeApi {
 
   settingsGet(): Promise<Settings>;
   settingsSet(patch: SettingsPatch): Promise<Settings>;
+
+  // ── search (yt-dlp in main; SPEC.md §7) ──
+  /** `ytsearch10:<query>` → results. Rejects when yt-dlp is missing/broken. */
+  search(query: string): Promise<SearchResult[]>;
+  searchStatus(): Promise<YtDlpStatus>;
+  /** Download the official macOS build into the app's data folder. */
+  searchInstall(): Promise<YtDlpStatus>;
+  onInstallProgress(cb: (p: InstallProgress) => void): () => void;
+
+  // ── TV mode (fullscreen, optionally on a chosen display) ──
+  displaysList(): Promise<DisplayInfo[]>;
+  getFullscreen(): Promise<boolean>;
+  setFullscreen(on: boolean, displayId?: number): Promise<void>;
+  onFullscreenChanged(cb: (on: boolean) => void): () => void;
 }
 
 declare global {

@@ -301,14 +301,21 @@ export class LyricsService {
       offsetMs: this.repo.getOffset(row.video_id),
       fromCache,
       warning: warningFor(track, lyrics),
+      driftS: driftFor(track, lyrics),
     };
   }
 }
 
-function warningFor(track: TrackInfo, lyrics: LyricsDoc | null): string | null {
+/** Signed video − lyrics length when beyond the SPEC.md §8 threshold, else null. */
+function driftFor(track: TrackInfo, lyrics: LyricsDoc | null): number | null {
   if (!lyrics?.providerDurationS || !track.durationS) return null;
   const diff = track.durationS - lyrics.providerDurationS;
-  if (Math.abs(diff) <= 3) return null;
+  return Math.abs(diff) <= 3 ? null : diff;
+}
+
+function warningFor(track: TrackInfo, lyrics: LyricsDoc | null): string | null {
+  const diff = driftFor(track, lyrics);
+  if (diff === null || !lyrics?.providerDurationS) return null;
   const artist = track.artist ?? 'artist';
   return (
     `Lyrics are timed for a ${lyrics.providerDurationS}s recording but this video is ` +

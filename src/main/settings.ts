@@ -57,6 +57,9 @@ export class SettingsStore {
           ? (ruby as RubyMode)
           : DEFAULT_SETTINGS.display.ruby,
       },
+      ytdlp: {
+        path: this.raw('ytdlp.path') ?? DEFAULT_SETTINGS.ytdlp.path,
+      },
     };
   }
 
@@ -82,6 +85,7 @@ export class SettingsStore {
         }
         if (d.ruby && RUBY_MODES.includes(d.ruby)) this.write('display.ruby', d.ruby);
       }
+      if (typeof patch.ytdlp?.path === 'string') this.write('ytdlp.path', patch.ytdlp.path.trim());
     })();
     return this.get();
   }
