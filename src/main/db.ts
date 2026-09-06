@@ -78,6 +78,29 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (hash, mode)
   );
   `,
+  // v6 — library & playlists: a play log (recently / most played) and
+  // user-made playlists over cached songs.
+  `
+  CREATE TABLE plays (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id  TEXT NOT NULL,
+    played_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX plays_video ON plays(video_id);
+
+  CREATE TABLE playlists (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE playlist_items (
+    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL,   -- dense 0..n-1
+    video_id    TEXT NOT NULL,
+    PRIMARY KEY (playlist_id, video_id)
+  );
+  `,
 ];
 
 export function getDbPath(): string {

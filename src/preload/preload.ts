@@ -4,6 +4,7 @@ import {
   type AlignSnapshot,
   type InstallProgress,
   type KaraokeApi,
+  type LibrarySnapshot,
   type QueueSnapshot,
 } from '../shared/ipc';
 
@@ -34,6 +35,17 @@ const api: KaraokeApi = {
   queueAdvance: () => ipcRenderer.invoke(IPC.queueAdvance),
   queueClear: () => ipcRenderer.invoke(IPC.queueClear),
   onQueueChanged: (cb) => on<QueueSnapshot>(IPC.queueChanged, cb),
+
+  libraryGet: () => ipcRenderer.invoke(IPC.libraryGet),
+  onLibraryChanged: (cb) => on<LibrarySnapshot>(IPC.libraryChanged, cb),
+  playRecord: (videoId) => ipcRenderer.invoke(IPC.playRecord, videoId),
+  playlistCreate: (name) => ipcRenderer.invoke(IPC.playlistCreate, name),
+  playlistRename: (id, name) => ipcRenderer.invoke(IPC.playlistRename, id, name),
+  playlistDelete: (id) => ipcRenderer.invoke(IPC.playlistDelete, id),
+  playlistAdd: (id, videoId) => ipcRenderer.invoke(IPC.playlistAdd, id, videoId),
+  playlistRemove: (id, videoId) => ipcRenderer.invoke(IPC.playlistRemove, id, videoId),
+  playlistMove: (id, videoId, toIndex) =>
+    ipcRenderer.invoke(IPC.playlistMove, id, videoId, toIndex),
 
   lyricsSetActive: (videoId, source) =>
     ipcRenderer.invoke(IPC.lyricsSetActive, videoId, source),

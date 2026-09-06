@@ -13,6 +13,7 @@ import {
   type AlignSnapshot,
   type AppInfo,
   type DisplayInfo,
+  type LibrarySnapshot,
   type LyricsMode,
   type QueueAddMode,
   type QueueSnapshot,
@@ -30,6 +31,7 @@ import {
 import { extractVideoId } from '../shared/youtubeUrl';
 import { AlignService } from './alignService';
 import { schemaVersion } from './db';
+import { LibraryService } from './libraryService';
 import { LyricsService } from './lyricsService';
 import { QueueService } from './queueService';
 import { Repo } from './repo';
@@ -129,9 +131,13 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
   const settings = new SettingsStore(db);
   const lyrics = new LyricsService(repo, settings);
   const ruby = new RubyService(repo);
-  const queue = new QueueService(repo, lyrics, (snapshot: QueueSnapshot) =>
-    broadcast(IPC.queueChanged, snapshot),
-  );
+  const library = new LibraryService(repo, (s) => broadcast(IPC.libraryChanged, s));
+  const queue = new QueueService(repo, lyrics, (snapshot: QueueSnapshot) => {
+    broadcast(IPC.queueChanged, snapshot);
+    // A queue refresh means a song's metadata / lyrics landed — the library
+    // shows those too.
+    library.broadcast();
+  });
   queue.init();
   const ytdlp = new YtDlp(settings, (p) => broadcast(IPC.searchInstallProgress, p));
   const topics = new TopicSuggester(repo, ytdlp);
@@ -217,6 +223,40 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
   ipcMain.handle(IPC.queueAdvance, (): void => queue.advance());
 
   ipcMain.handle(IPC.queueClear, (): void => queue.clear());
+
+  // ── library & playlists ──
+  ipcMain.handle(IPC.libraryGet, (): LibrarySnapshot => library.snapshot());
+
+  ipcMain.handle(IPC.playRecord, (_e, videoId: unknown): void => {
+    library.recordPlay(assertVideoId(videoId));
+  });
+
+  ipcMain.handle(IPC.playlistCreate, (_e, name: unknown): number => {
+    return library.create(assertText(name, 'playlist name', 100));
+  });
+
+  ipcMain.handle(IPC.playlistRename, (_e, id: unknown, name: unknown): void => {
+    library.rename(assertInt(id, 'playlist id'), assertText(name, 'playlist name', 100));
+  });
+
+  ipcMain.handle(IPC.playlistDelete, (_e, id: unknown): void => {
+    library.delete(assertInt(id, 'playlist id'));
+  });
+
+  ipcMain.handle(IPC.playlistAdd, (_e, id: unknown, videoId: unknown): void => {
+    library.add(assertInt(id, 'playlist id'), assertVideoId(videoId));
+  });
+
+  ipcMain.handle(IPC.playlistRemove, (_e, id: unknown, videoId: unknown): void => {
+    library.remove(assertInt(id, 'playlist id'), assertVideoId(videoId));
+  });
+
+  ipcMain.handle(
+    IPC.playlistMove,
+    (_e, id: unknown, videoId: unknown, toIndex: unknown): void => {
+      library.move(assertInt(id, 'playlist id'), assertVideoId(videoId), assertInt(toIndex, 'index'));
+    },
+  );
 
   // ── lyrics inspector ──
   ipcMain.handle(

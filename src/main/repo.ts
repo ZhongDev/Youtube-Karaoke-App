@@ -1,5 +1,12 @@
 import type Database from 'better-sqlite3';
-import type { LyricsDoc, LyricsKind, MetaSource, TrackInfo } from '../shared/ipc';
+import type {
+  LibrarySong,
+  LyricsDoc,
+  LyricsKind,
+  MetaSource,
+  Playlist,
+  TrackInfo,
+} from '../shared/ipc';
 import { isLanguage, type Language } from '../shared/language';
 
 export interface TrackRow {
@@ -322,5 +329,132 @@ export class Repo {
 
   clearQueue(): void {
     this.db.prepare('DELETE FROM queue').run();
+  }
+
+  // ── library & playlists ────────────────────────────────────
+
+  /** Every cached song (metadata known), with play stats and best lyrics kind. */
+  listLibrary(): LibrarySong[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.video_id, t.title, t.channel, t.artist, t.track, t.duration_s, t.is_topic,
+                t.embeddable, t.created_at,
+                (SELECT COUNT(*) FROM plays p WHERE p.video_id = t.video_id) AS play_count,
+                (SELECT MAX(p.played_at) FROM plays p WHERE p.video_id = t.video_id) AS last_played_at,
+                COALESCE(
+                  (SELECT l.kind FROM lyrics l
+                   WHERE l.video_id = t.video_id AND l.source = t.active_source),
+                  (SELECT l.kind FROM lyrics l WHERE l.video_id = t.video_id
+                   ORDER BY (CASE l.kind WHEN 'synced_word' THEN 3
+                                         WHEN 'synced_line' THEN 2 ELSE 1 END)
+                            - (CASE WHEN l.source = 'transcribed' THEN 2.5 ELSE 0 END) DESC
+                   LIMIT 1)) AS best_kind
+         FROM tracks t
+         WHERE t.title IS NOT NULL
+         ORDER BY t.created_at DESC`,
+      )
+      .all() as Array<{
+      video_id: string;
+      title: string;
+      channel: string | null;
+      artist: string | null;
+      track: string | null;
+      duration_s: number | null;
+      is_topic: number;
+      embeddable: number;
+      created_at: string;
+      play_count: number;
+      last_played_at: string | null;
+      best_kind: LyricsKind | null;
+    }>;
+    return rows.map((r) => ({
+      videoId: r.video_id,
+      title: r.title,
+      channel: r.channel ?? '',
+      artist: r.artist,
+      track: r.track,
+      durationS: r.duration_s,
+      isTopic: r.is_topic === 1,
+      embeddable: r.embeddable !== 0,
+      lyrics: r.best_kind ?? 'none',
+      playCount: r.play_count,
+      lastPlayedAt: r.last_played_at,
+      addedAt: r.created_at,
+    }));
+  }
+
+  recordPlay(videoId: string): void {
+    this.db.prepare('INSERT INTO plays (video_id) VALUES (?)').run(videoId);
+  }
+
+  listPlaylists(): Playlist[] {
+    const lists = this.db
+      .prepare('SELECT id, name FROM playlists ORDER BY created_at, id')
+      .all() as { id: number; name: string }[];
+    const items = this.db.prepare(
+      'SELECT video_id FROM playlist_items WHERE playlist_id = ? ORDER BY position',
+    );
+    return lists.map((l) => ({
+      id: l.id,
+      name: l.name,
+      videoIds: (items.all(l.id) as { video_id: string }[]).map((r) => r.video_id),
+    }));
+  }
+
+  createPlaylist(name: string): number {
+    const r = this.db.prepare('INSERT INTO playlists (name) VALUES (?)').run(name);
+    return Number(r.lastInsertRowid);
+  }
+
+  renamePlaylist(id: number, name: string): void {
+    this.db.prepare('UPDATE playlists SET name = ? WHERE id = ?').run(name, id);
+  }
+
+  deletePlaylist(id: number): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM playlist_items WHERE playlist_id = ?').run(id);
+      this.db.prepare('DELETE FROM playlists WHERE id = ?').run(id);
+    })();
+  }
+
+  playlistExists(id: number): boolean {
+    return this.db.prepare('SELECT 1 FROM playlists WHERE id = ?').get(id) !== undefined;
+  }
+
+  /** Append; a song already in the list stays where it is. */
+  addToPlaylist(id: number, videoId: string): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO playlist_items (playlist_id, position, video_id)
+         VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_items WHERE playlist_id = ?), ?)`,
+      )
+      .run(id, id, videoId);
+  }
+
+  removeFromPlaylist(id: number, videoId: string): void {
+    this.db.transaction(() => {
+      this.db
+        .prepare('DELETE FROM playlist_items WHERE playlist_id = ? AND video_id = ?')
+        .run(id, videoId);
+      this.setPlaylistOrder(id, this.playlistVideoIds(id));
+    })();
+  }
+
+  playlistVideoIds(id: number): string[] {
+    return (
+      this.db
+        .prepare('SELECT video_id FROM playlist_items WHERE playlist_id = ? ORDER BY position')
+        .all(id) as { video_id: string }[]
+    ).map((r) => r.video_id);
+  }
+
+  /** Rewrite positions to match `videoIds` (dense 0..n-1). */
+  setPlaylistOrder(id: number, videoIds: string[]): void {
+    const stmt = this.db.prepare(
+      'UPDATE playlist_items SET position = ? WHERE playlist_id = ? AND video_id = ?',
+    );
+    this.db.transaction(() => {
+      videoIds.forEach((v, i) => stmt.run(i, id, v));
+    })();
   }
 }

@@ -183,6 +183,40 @@ export interface QueueSnapshot {
 
 export type QueueAddMode = 'end' | 'next';
 
+// ── library & playlists ──
+
+/** A song the app has cached (metadata fetched at least once). */
+export interface LibrarySong {
+  videoId: string;
+  title: string;
+  channel: string;
+  artist: string | null;
+  track: string | null;
+  durationS: number | null;
+  isTopic: boolean;
+  embeddable: boolean;
+  /** Best stored lyrics kind, or 'none'. */
+  lyrics: 'synced_word' | 'synced_line' | 'plain' | 'none';
+  playCount: number;
+  /** ISO-ish UTC timestamp of the last play ('YYYY-MM-DD HH:MM:SS'), or null. */
+  lastPlayedAt: string | null;
+  addedAt: string;
+}
+
+/** A user-made playlist; the smart ones (recent / most played / all) are derived. */
+export interface Playlist {
+  id: number;
+  name: string;
+  /** In playlist order. */
+  videoIds: string[];
+}
+
+export interface LibrarySnapshot {
+  rev: number;
+  songs: LibrarySong[];
+  playlists: Playlist[];
+}
+
 // ── search & Topic suggestion (SPEC.md §7, Phase 4) ──
 
 /** One `yt-dlp ytsearch` hit. */
@@ -312,6 +346,16 @@ export const IPC = {
   queueClear: 'queue:clear',
   /** main → renderer push, payload: QueueSnapshot */
   queueChanged: 'queue:changed',
+  libraryGet: 'library:get',
+  /** main → renderer push, payload: LibrarySnapshot */
+  libraryChanged: 'library:changed',
+  playRecord: 'library:record-play',
+  playlistCreate: 'playlist:create',
+  playlistRename: 'playlist:rename',
+  playlistDelete: 'playlist:delete',
+  playlistAdd: 'playlist:add',
+  playlistRemove: 'playlist:remove',
+  playlistMove: 'playlist:move',
   lyricsSetActive: 'lyrics:set-active',
   lyricsSetManual: 'lyrics:set-manual',
   lyricsSetMeta: 'lyrics:set-meta',
@@ -380,6 +424,20 @@ export interface KaraokeApi {
   queueClear(): Promise<void>;
   /** Subscribe to queue snapshots; returns an unsubscribe function. */
   onQueueChanged(cb: (snapshot: QueueSnapshot) => void): () => void;
+
+  // ── library (every cached song) & playlists ──
+  libraryGet(): Promise<LibrarySnapshot>;
+  onLibraryChanged(cb: (snapshot: LibrarySnapshot) => void): () => void;
+  /** The video started playing: feeds "recently played" / "most played". */
+  playRecord(videoId: string): Promise<void>;
+  playlistCreate(name: string): Promise<number>;
+  playlistRename(id: number, name: string): Promise<void>;
+  playlistDelete(id: number): Promise<void>;
+  /** Append a song (no-op if it is already in the playlist). */
+  playlistAdd(id: number, videoId: string): Promise<void>;
+  playlistRemove(id: number, videoId: string): Promise<void>;
+  /** Reorder: `toIndex` is the song's final index within the playlist. */
+  playlistMove(id: number, videoId: string, toIndex: number): Promise<void>;
 
   // ── lyrics inspector (SPEC.md §7). Each returns the fresh ResolveResult. ──
   /** Pin the active lyrics to `source`, or null to go back to best-by-rank. */

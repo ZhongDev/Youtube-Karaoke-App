@@ -10,8 +10,10 @@ import type {
 import { formatOffset } from '../shared/autoOffset';
 import { parseLrc } from '../shared/lrc';
 import { SyncClock } from '../shared/syncClock';
+import LibraryModal from './components/LibraryModal';
 import LyricsDisplay, { type LyricsStatus } from './components/LyricsDisplay';
 import LyricsInspector from './components/LyricsInspector';
+import OffsetPopover from './components/OffsetPopover';
 import Player, { type PlayerHandle } from './components/Player';
 import QueuePanel from './components/QueuePanel';
 import SearchBar from './components/SearchBar';
@@ -19,6 +21,7 @@ import SettingsModal from './components/SettingsModal';
 import TvButton from './components/TvButton';
 import { ipcErrorMessage } from './ipcError';
 import { KIND_LABEL, isAlignActive, overallPercent, useAlign } from './useAlign';
+import { useLibrary } from './useLibrary';
 import { useQueue } from './useQueue';
 import { useRuby } from './useRuby';
 import { useSettings } from './useSettings';
@@ -87,7 +90,11 @@ export default function App() {
   const [queueOpen, setQueueOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const modalOpen = inspectorOpen || settingsOpen;
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [offsetOpen, setOffsetOpen] = useState(false);
+  const offsetOpenRef = useRef(false);
+  offsetOpenRef.current = offsetOpen;
+  const modalOpen = inspectorOpen || settingsOpen || libraryOpen;
   const modalOpenRef = useRef(false);
   modalOpenRef.current = modalOpen;
   const [tv, setTv] = useState(false);
@@ -99,6 +106,7 @@ export default function App() {
 
   const resolvedWithDurRef = useRef(false);
   const endedRef = useRef(false);
+  const playedRef = useRef(false);
   const skipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -134,6 +142,8 @@ export default function App() {
     setOffsetMs(0);
     resolvedWithDurRef.current = false;
     endedRef.current = false;
+    playedRef.current = false;
+    setOffsetOpen(false);
     if (skipTimer.current) {
       clearTimeout(skipTimer.current);
       skipTimer.current = null;
@@ -274,9 +284,26 @@ export default function App() {
     return () => window.removeEventListener('blur', onBlur);
   }, []);
 
+  /** Apply + persist a new offset for the playing video. */
+  const applyOffset = useCallback(
+    (next: number, announce: boolean) => {
+      if (!videoId) return;
+      setOffsetMs(next);
+      window.karaoke.setOffset(videoId, next).catch(console.error);
+      if (!announce) return;
+      const sign = next > 0 ? '+' : '';
+      showToast(
+        next === 0
+          ? 'Offset reset'
+          : `Offset ${sign}${next} ms (lyrics ${next > 0 ? 'earlier' : 'later'})`,
+      );
+    },
+    [videoId, showToast],
+  );
+
   // Hotkeys: Space play/pause; [ / ] nudge offset ∓100ms, Shift ∓500ms, \ resets;
-  // i = lyrics inspector; t = TV mode (Esc leaves it). All off while a modal
-  // is open (Esc closes it) or while typing in a text field.
+  // i = lyrics inspector; l = library; t = TV mode (Esc leaves it). All off
+  // while a modal is open (Esc closes it) or while typing in a text field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
@@ -289,12 +316,18 @@ export default function App() {
         return;
       }
       if (e.key === 'Escape') {
-        if (tvRef.current) setFullscreen(false);
+        if (offsetOpenRef.current) setOffsetOpen(false);
+        else if (tvRef.current) setFullscreen(false);
         return;
       }
       if (e.key === 'i' && videoId) {
         e.preventDefault();
         setInspectorOpen(true);
+        return;
+      }
+      if (e.key === 'l') {
+        e.preventDefault();
+        setLibraryOpen(true);
         return;
       }
       if (e.key === ' ') {
@@ -316,18 +349,14 @@ export default function App() {
       if (next === null) return;
 
       e.preventDefault();
-      setOffsetMs(next);
-      window.karaoke.setOffset(videoId, next).catch(console.error);
-      const sign = next > 0 ? '+' : '';
-      showToast(
-        next === 0
-          ? 'Offset reset'
-          : `Offset ${sign}${next} ms (lyrics ${next > 0 ? 'earlier' : 'later'})`,
-      );
+      applyOffset(next, true);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [videoId, setFullscreen, showToast]);
+  }, [videoId, setFullscreen, applyOffset]);
+
+  // Library: every cached song, as playlists (button / l).
+  const library = useLibrary();
 
   // Background worker jobs (Phases 5–6): a finished job for the playing song
   // re-resolves it so the new document (or the auto-offset) takes over live.
@@ -441,6 +470,13 @@ export default function App() {
           >
             ☰ queue{queue.items.length ? ` · ${queue.items.length}` : ''}
           </button>
+          <button
+            className="mode-toggle"
+            title="Library (l): every cached song, recently / most played, your playlists"
+            onClick={() => setLibraryOpen(true)}
+          >
+            ♫ library{library.songs.length ? ` · ${library.songs.length}` : ''}
+          </button>
           <TvButton
             tv={tv}
             onEnter={(displayId) => setFullscreen(true, displayId)}
@@ -479,6 +515,11 @@ export default function App() {
                 }}
                 onStateChange={(name) => {
                   setPlayerState(name);
+                  // One play per item for the library's recently / most played.
+                  if (name === 'playing' && !playedRef.current) {
+                    playedRef.current = true;
+                    window.karaoke.playRecord(videoId).catch(console.error);
+                  }
                   // Auto-advance exactly once per item (SPEC.md §7).
                   if (name === 'ended' && !endedRef.current) {
                     endedRef.current = true;
@@ -613,12 +654,42 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
         />
       )}
+      {libraryOpen && (
+        <LibraryModal
+          songs={library.songs}
+          playlists={library.playlists}
+          onQueue={addToQueue}
+          onCreate={library.create}
+          onRename={library.rename}
+          onDelete={library.remove}
+          onAdd={library.add}
+          onRemoveSong={library.removeSong}
+          onMove={library.move}
+          onClose={() => setLibraryOpen(false)}
+        />
+      )}
 
       <footer className="statusbar">
         <span className="time-readout">t = {formatTime(timeS)}</span>
-        <span className="offset-chip">
-          offset {offsetMs >= 0 ? '+' : ''}
-          {offsetMs} ms
+        <span className="offset-anchor">
+          <button
+            className={`offset-chip clickable ${offsetOpen ? 'open' : ''}`}
+            title="Lyrics offset: click for slider / exact entry / reset ( [ ] nudge, \\ resets)"
+            disabled={!videoId}
+            onClick={() => setOffsetOpen((o) => !o)}
+          >
+            offset {offsetMs >= 0 ? '+' : ''}
+            {offsetMs} ms
+          </button>
+          {offsetOpen && videoId && (
+            <OffsetPopover
+              offsetMs={offsetMs}
+              onChange={(ms) => applyOffset(ms, false)}
+              onAuto={parsed ? () => startJob('offset') : null}
+              autoBusy={currentJobActive}
+              onClose={() => setOffsetOpen(false)}
+            />
+          )}
         </span>
         <span className="state-chip">{playerState}</span>
         {nowPlayingLabel && <span className="now-playing-chip">▶ {nowPlayingLabel}</span>}

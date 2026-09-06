@@ -1352,3 +1352,273 @@ body.cursor-hidden * {
   max-width: 34%;
   font-variant-numeric: tabular-nums;
 }
+
+/* ── library modal ───────────────────────────────────────── */
+
+.modal.library {
+  width: min(1100px, 94vw);
+  height: min(760px, 88vh);
+  display: flex;
+  flex-direction: column;
+}
+
+.lib-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 14px;
+}
+
+.lib-nav {
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  padding-right: 6px;
+  border-right: 1px solid var(--border);
+}
+
+.lib-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lib-nav-item > span:first-child,
+.lib-nav-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lib-nav-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.lib-nav-item.active {
+  background: rgba(126, 224, 129, 0.1);
+  border-color: rgba(126, 224, 129, 0.4);
+}
+
+.lib-nav-item input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+}
+
+.lib-nav-tools {
+  display: none;
+  gap: 2px;
+}
+
+.lib-nav-item:hover .lib-nav-tools,
+.lib-nav-item.active .lib-nav-tools {
+  display: inline-flex;
+}
+
+.lib-nav-head {
+  margin-top: 12px;
+  padding: 4px 10px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.lib-new {
+  display: flex;
+  gap: 6px;
+  padding: 6px 4px 4px 10px;
+}
+
+.lib-new input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+}
+
+.lib-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.lib-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.lib-toolbar h3 {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.lib-filter {
+  width: 200px;
+  font: inherit;
+}
+
+.lib-empty {
+  padding: 24px 8px;
+  text-align: center;
+}
+
+.lib-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.lib-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.lib-row.blocked .lib-title {
+  color: var(--text-dim);
+}
+
+.lib-song {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.lib-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lib-meta {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lib-actions {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.lib-add-select {
+  font: inherit;
+  font-size: 12px;
+  max-width: 120px;
+}
+
+/* ── offset popover ──────────────────────────────────────── */
+
+.offset-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.offset-chip.clickable {
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid transparent;
+  font: inherit;
+  background: none;
+  color: inherit;
+}
+
+.offset-chip.clickable:hover,
+.offset-chip.clickable.open {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.offset-pop {
+  position: fixed; /* left / bottom set from the chip's box (OffsetPopover) */
+  width: 340px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #161a21;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 30;
+  font-size: 13px;
+}
+
+.offset-pop-head {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.offset-pop-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.offset-pop input[type='range'] {
+  width: 100%;
+}
+
+.offset-pop-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-top: -4px;
+}
+
+.offset-pop-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.offset-pop-row .url-load {
+  flex: 1 1 0;
+}
+
+.offset-pop-field {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.offset-pop-field input {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.offset-pop-field span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.offset-pop-hint {
+  font-size: 11px;
+}
