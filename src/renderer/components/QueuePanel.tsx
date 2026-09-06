@@ -1,6 +1,7 @@
 import { useState, type DragEvent, type MouseEvent } from 'react';
 import type { QueueItem, QueueLyricsState } from '../../shared/ipc';
 import { gapForHover, gapToFinalIndex } from '../../shared/queueLogic';
+import { formatDuration } from '../youtube';
 
 // Queue sidebar (SPEC.md §7): now-playing block + drag-reorderable "up next"
 // list with per-item lyric badges. Reordering uses native HTML5 drag & drop —
@@ -26,12 +27,6 @@ const BADGES: Record<QueueLyricsState, { icon: string; label: string }> = {
   none: { icon: '✗', label: 'no lyrics' },
   error: { icon: '⚠', label: 'unavailable' },
 };
-
-function formatDuration(s: number | null): string {
-  if (s === null || !Number.isFinite(s) || s <= 0) return '';
-  const m = Math.floor(s / 60);
-  return `${m}:${String(Math.round(s - m * 60)).padStart(2, '0')}`;
-}
 
 function titleOf(item: QueueItem): { primary: string; secondary: string } {
   if (item.lyrics === 'error' && !item.title) {

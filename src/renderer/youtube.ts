@@ -42,3 +42,19 @@ export function formatTime(seconds: number): string {
   const s = seconds - m * 60;
   return `${m}:${s.toFixed(1).padStart(4, '0')}`;
 }
+
+/** "3:45" for a duration in seconds; '' when unknown. */
+export function formatDuration(s: number | null): string {
+  if (s === null || !Number.isFinite(s) || s <= 0) return '';
+  const t = Math.round(s);
+  const m = Math.floor(t / 60);
+  return `${m}:${String(t - m * 60).padStart(2, '0')}`;
+}
+
+/** 1.6B / 297M / 84K style view counts. */
+export function formatViews(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `${n >= 1e7 ? Math.round(n / 1e6) : (n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+  return String(n);
+}

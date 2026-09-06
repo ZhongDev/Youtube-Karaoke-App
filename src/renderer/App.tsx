@@ -1,19 +1,36 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AppInfo, QueueAddMode, ResolveResult } from '../shared/ipc';
+import type {
+  AppInfo,
+  QueueAddMode,
+  QueueItem,
+  ResolveResult,
+  TopicSuggestion,
+} from '../shared/ipc';
 import { parseLrc } from '../shared/lrc';
 import { SyncClock } from '../shared/syncClock';
 import LyricsDisplay, { type LyricsStatus } from './components/LyricsDisplay';
 import LyricsInspector from './components/LyricsInspector';
 import Player, { type PlayerHandle } from './components/Player';
 import QueuePanel from './components/QueuePanel';
+import SearchBar from './components/SearchBar';
 import SettingsModal from './components/SettingsModal';
-import UrlBar from './components/UrlBar';
+import TvButton from './components/TvButton';
+import { ipcErrorMessage } from './ipcError';
 import { useQueue } from './useQueue';
 import { useSettings } from './useSettings';
-import { formatTime } from './youtube';
+import { formatDuration, formatTime } from './youtube';
 
 /** Unplayable video (embed-blocked, removed, …) → move on after this long. */
 const AUTO_SKIP_MS = 5000;
+/** TV mode hides the pointer after this much stillness. */
+const CURSOR_HIDE_MS = 2500;
+
+/** An embed-blocked song: hunting for / found / no Topic alternative. */
+type Blocked = 'looking' | 'none' | TopicSuggestion;
+
+function songLabel(item: QueueItem): string {
+  return item.track && item.artist ? `${item.artist} — ${item.track}` : item.title || item.videoId;
+}
 
 export default function App() {
   const clockRef = useRef(new SyncClock());
@@ -22,28 +39,34 @@ export default function App() {
   const { settings, update: updateSettings } = useSettings();
   const lyricsMode = settings.display.lyricsMode;
 
-  // The queue's head is what's playing. The Player is keyed by the queue
-  // item id (not the video id) so the same song queued twice still remounts.
+  // The queue's head is what's playing. One "play" is one queue row playing
+  // one video, so the Player is keyed by both: the same song queued twice
+  // still remounts, and so does a row whose video was swapped for the Topic
+  // upload.
   const queue = useQueue();
-  const { advance: queueAdvance, add: queueAdd } = queue; // stable identities
+  const { advance: queueAdvance, add: queueAdd, replace: queueReplace } = queue; // stable
   const current = queue.items[0] ?? null;
   const currentId = current?.id ?? null;
   const videoId = current?.videoId ?? null;
+  const playKey = current ? `${current.id}:${current.videoId}` : null;
+  const playKeyRef = useRef(playKey);
+  playKeyRef.current = playKey;
   const currentIdRef = useRef(currentId);
   currentIdRef.current = currentId;
   const currentVideoIdRef = useRef(videoId);
   currentVideoIdRef.current = videoId;
 
   // The item restored from disk at launch is cued, not autoplayed; every
-  // later head change (add, skip, song ended) is user-driven → autoplay.
-  const initialIdRef = useRef<number | null | undefined>(undefined);
-  if (queue.loaded && initialIdRef.current === undefined) initialIdRef.current = currentId;
-  const autoplay = queue.loaded && currentId !== initialIdRef.current;
+  // later head change (add, skip, song ended, Topic swap) is user-driven.
+  const initialKeyRef = useRef<string | null | undefined>(undefined);
+  if (queue.loaded && initialKeyRef.current === undefined) initialKeyRef.current = playKey;
+  const autoplay = queue.loaded && playKey !== initialKeyRef.current;
 
   const [result, setResult] = useState<ResolveResult | null>(null);
   const [lyricsStatus, setLyricsStatus] = useState<LyricsStatus>('idle');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [playerError, setPlayerError] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<Blocked | null>(null);
 
   const [offsetMs, setOffsetMs] = useState(0);
   const offsetMsRef = useRef(0);
@@ -58,6 +81,9 @@ export default function App() {
   const modalOpen = inspectorOpen || settingsOpen;
   const modalOpenRef = useRef(false);
   modalOpenRef.current = modalOpen;
+  const [tv, setTv] = useState(false);
+  const tvRef = useRef(false);
+  tvRef.current = tv;
   const [playerState, setPlayerState] = useState('idle');
   const [timeS, setTimeS] = useState(0);
   const [durationS, setDurationS] = useState(0);
@@ -70,28 +96,29 @@ export default function App() {
     window.karaoke.getAppInfo().then(setAppInfo).catch(console.error);
   }, []);
 
-  const resolve = useCallback((id: string, itemId: number, duration?: number) => {
+  const resolve = useCallback((id: string, key: string, duration?: number) => {
     window.karaoke
       .resolveVideo(id, duration)
       .then((r) => {
-        if (currentIdRef.current !== itemId) return; // head changed meanwhile
+        if (playKeyRef.current !== key) return; // head changed meanwhile
         setResult(r);
         setOffsetMs(r.offsetMs);
         setLyricsStatus('done');
       })
       .catch((err: unknown) => {
-        if (currentIdRef.current !== itemId) return;
+        if (playKeyRef.current !== key) return;
         setLyricsStatus('error');
-        setLoadError(err instanceof Error ? err.message : String(err));
+        setLoadError(ipcErrorMessage(err));
       });
   }, []);
 
-  // Per-song reset whenever the queue head changes.
+  // Per-song reset whenever the play key changes.
   useEffect(() => {
     clockRef.current.reset();
     setResult(null);
     setLoadError(null);
     setPlayerError(null);
+    setBlocked(null);
     setPlayerState(videoId ? 'loading' : 'idle');
     setTimeS(0);
     setDurationS(0);
@@ -102,18 +129,38 @@ export default function App() {
       clearTimeout(skipTimer.current);
       skipTimer.current = null;
     }
-    if (currentId === null || !videoId) {
+    if (!playKey || !videoId) {
       setLyricsStatus('idle');
       return;
     }
     setLyricsStatus('fetching');
     // Usually a cache hit thanks to the queue prefetch; never blocks playback.
-    resolve(videoId, currentId);
-  }, [currentId, videoId, resolve]);
+    resolve(videoId, playKey);
+  }, [playKey, videoId, resolve]);
 
   const advance = useCallback(() => {
     queueAdvance().catch(console.error);
   }, [queueAdvance]);
+
+  /** (Re)arm the single auto-skip/switch timer. */
+  const arm = useCallback((fn: () => void) => {
+    if (skipTimer.current) clearTimeout(skipTimer.current);
+    skipTimer.current = setTimeout(fn, AUTO_SKIP_MS);
+  }, []);
+
+  /** Swap the now-playing row to the suggested Topic upload (same queue slot). */
+  const replaceCurrent = useCallback(
+    (s: TopicSuggestion) => {
+      const id = currentIdRef.current;
+      if (id === null) return;
+      if (skipTimer.current) {
+        clearTimeout(skipTimer.current);
+        skipTimer.current = null;
+      }
+      queueReplace(id, s.videoId, s.durationS ?? undefined).catch(console.error);
+    },
+    [queueReplace],
+  );
 
   const failPlayback = useCallback(
     (message: string, autoSkip: boolean) => {
@@ -122,17 +169,45 @@ export default function App() {
         return;
       }
       setPlayerError(`${message} Skipping in ${AUTO_SKIP_MS / 1000}s…`);
-      if (skipTimer.current) clearTimeout(skipTimer.current);
-      skipTimer.current = setTimeout(advance, AUTO_SKIP_MS);
+      arm(advance);
     },
-    [advance],
+    [advance, arm],
   );
 
+  // Embed-blocked (SPEC.md §3, §8): look for the auto-generated Topic upload
+  // and, if one is found, switch to it after a short countdown so the queue
+  // keeps flowing hands-free; otherwise skip as before.
+  const onEmbedBlocked = useCallback(() => {
+    const key = playKeyRef.current;
+    const id = currentVideoIdRef.current;
+    if (!key || !id) return;
+    window.karaoke.markEmbedBlocked(id).catch(console.error);
+    setPlayerError('This upload blocks embedding.');
+    setBlocked('looking');
+    window.karaoke
+      .suggestTopic(id)
+      .then((s) => {
+        if (playKeyRef.current !== key) return;
+        if (s) {
+          setBlocked(s);
+          arm(() => replaceCurrent(s));
+        } else {
+          setBlocked('none');
+          arm(advance);
+        }
+      })
+      .catch(() => {
+        if (playKeyRef.current !== key) return;
+        setBlocked('none');
+        arm(advance);
+      });
+  }, [advance, arm, replaceCurrent]);
+
   const addToQueue = useCallback(
-    (input: string, mode: QueueAddMode) => {
+    (input: string, mode: QueueAddMode, durationS?: number) => {
       setLoadError(null);
-      queueAdd(input, mode).catch((err: unknown) => {
-        setLoadError(err instanceof Error ? err.message : String(err));
+      queueAdd(input, mode, durationS).catch((err: unknown) => {
+        setLoadError(ipcErrorMessage(err));
       });
     },
     [queueAdd],
@@ -146,14 +221,52 @@ export default function App() {
     setLyricsStatus('done');
   }, []);
 
+  // ── TV mode: mirrors the window's fullscreen state (SPEC.md §7) ──
+  useEffect(() => {
+    window.karaoke.getFullscreen().then(setTv).catch(console.error);
+    return window.karaoke.onFullscreenChanged(setTv);
+  }, []);
+
+  const setFullscreen = useCallback((on: boolean, displayId?: number) => {
+    window.karaoke.setFullscreen(on, displayId).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    if (!tv) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const hide = () => document.body.classList.add('cursor-hidden');
+    const wake = () => {
+      document.body.classList.remove('cursor-hidden');
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(hide, CURSOR_HIDE_MS);
+    };
+    wake();
+    window.addEventListener('mousemove', wake);
+    return () => {
+      if (timer) clearTimeout(timer);
+      window.removeEventListener('mousemove', wake);
+      document.body.classList.remove('cursor-hidden');
+    };
+  }, [tv]);
+
   // Hotkeys: Space play/pause; [ / ] nudge offset ∓100ms, Shift ∓500ms, \ resets;
-  // i = lyrics inspector. All off while a modal is open (Esc closes it).
+  // i = lyrics inspector; t = TV mode (Esc leaves it). All off while a modal
+  // is open (Esc closes it) or while typing in a text field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
       if (modalOpenRef.current) return;
 
+      if (e.key === 't') {
+        e.preventDefault();
+        setFullscreen(!tvRef.current);
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (tvRef.current) setFullscreen(false);
+        return;
+      }
       if (e.key === 'i' && videoId) {
         e.preventDefault();
         setInspectorOpen(true);
@@ -191,13 +304,21 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [videoId]);
+  }, [videoId, setFullscreen]);
 
   const parsed = useMemo(() => {
     const doc = result?.lyrics;
     if (!doc || doc.kind === 'plain') return null;
     return parseLrc(doc.body);
   }, [result]);
+
+  // Drift (SPEC.md §8): the lyrics are timed for a recording of a different
+  // length → offer the Topic upload as a one-click switch (never automatic).
+  const driftSuggestion = useTopicSuggestion(
+    result?.driftS !== null && result?.driftS !== undefined && current && !current.isTopic
+      ? videoId
+      : null,
+  );
 
   const badge = (() => {
     if (!videoId) return null;
@@ -215,15 +336,12 @@ export default function App() {
     return `${label} · ${doc.source}${lang}${result?.fromCache ? ' · cached' : ''}`;
   })();
 
-  const nowPlayingLabel = current
-    ? current.track && current.artist
-      ? `${current.artist} — ${current.track}`
-      : current.title || current.videoId
-    : '';
+  const nowPlayingLabel = current ? songLabel(current) : '';
+  const upNext = queue.items[1] ?? null;
 
   const lyricsBlock = current && videoId && !playerError && (
     <LyricsDisplay
-      key={current.id}
+      key={playKey}
       status={lyricsStatus}
       doc={result?.lyrics ?? null}
       parsed={parsed}
@@ -238,10 +356,10 @@ export default function App() {
   const layerStyle = parsed && lyricsMode === 'twoTrack' ? 'mode-twotrack' : 'mode-window';
 
   return (
-    <div className="shell">
+    <div className={`shell ${tv ? 'tv' : ''}`}>
       <header className="topbar">
         <span className="brand">YouTube Karaoke</span>
-        <UrlBar onAdd={addToQueue} />
+        <SearchBar onAdd={addToQueue} />
         <span className="topbar-status">
           {badge && (
             <button
@@ -266,9 +384,14 @@ export default function App() {
           >
             ☰ queue{queue.items.length ? ` · ${queue.items.length}` : ''}
           </button>
+          <TvButton
+            tv={tv}
+            onEnter={(displayId) => setFullscreen(true, displayId)}
+            onExit={() => setFullscreen(false)}
+          />
           <button
             className="mode-toggle"
-            title="Settings: providers, Ollama, cache"
+            title="Settings: lyrics display, providers, Ollama, yt-dlp, cache"
             onClick={() => setSettingsOpen(true)}
           >
             ⚙
@@ -282,9 +405,9 @@ export default function App() {
       <div className="content">
         <main className="stage-column">
           <div className="stage">
-            {current && videoId ? (
+            {current && videoId && playKey ? (
               <Player
-                key={current.id}
+                key={playKey}
                 videoId={videoId}
                 autoplay={autoplay}
                 clock={clockRef.current}
@@ -294,7 +417,7 @@ export default function App() {
                   if (dur > 0 && !resolvedWithDurRef.current) {
                     resolvedWithDurRef.current = true;
                     // Re-resolve with duration: tightens matching, stores it.
-                    resolve(videoId, current.id, dur);
+                    resolve(videoId, playKey, dur);
                   }
                 }}
                 onStateChange={(name) => {
@@ -313,17 +436,11 @@ export default function App() {
                     // ready; pick it up once metadata is in.
                     if (!resolvedWithDurRef.current) {
                       resolvedWithDurRef.current = true;
-                      resolve(videoId, current.id, dur);
+                      resolve(videoId, playKey, dur);
                     }
                   }
                 }}
-                onEmbedBlocked={() => {
-                  window.karaoke.markEmbedBlocked(videoId).catch(console.error);
-                  failPlayback(
-                    'This upload blocks embedding — try another upload of this song (e.g. the "Artist - Topic" one).',
-                    true,
-                  );
-                }}
+                onEmbedBlocked={onEmbedBlocked}
                 onError={(code) =>
                   failPlayback(
                     code === -1
@@ -337,13 +454,42 @@ export default function App() {
             ) : (
               <div className="empty-hint">
                 {queue.loaded
-                  ? 'Queue is empty — paste a YouTube URL above to add a song.'
+                  ? 'Queue is empty — search for a song or paste a YouTube URL above.'
                   : ''}
               </div>
             )}
             {playerError && (
               <div className="player-error">
                 <div>{playerError}</div>
+                {blocked === 'looking' && (
+                  <div className="muted">
+                    Looking for the auto-generated “Artist - Topic” upload of this song…
+                  </div>
+                )}
+                {blocked === 'none' && (
+                  <div className="muted">
+                    No Topic upload found — skipping in {AUTO_SKIP_MS / 1000} s. Try another
+                    upload of this song.
+                  </div>
+                )}
+                {blocked !== null && typeof blocked === 'object' && (
+                  <div className="suggest">
+                    <div className="muted">
+                      Switching to the Topic upload in {AUTO_SKIP_MS / 1000} s:
+                    </div>
+                    <div className="suggest-title">
+                      ♪ {blocked.title}
+                      <span className="muted">
+                        {' '}
+                        · {blocked.channel}
+                        {blocked.durationS ? ` · ${formatDuration(blocked.durationS)}` : ''}
+                      </span>
+                    </div>
+                    <button className="url-load" onClick={() => replaceCurrent(blocked)}>
+                      Switch now
+                    </button>
+                  </div>
+                )}
                 {queue.items.length > 0 && (
                   <button className="url-load" onClick={advance}>
                     Skip now ⏭
@@ -353,6 +499,19 @@ export default function App() {
             )}
             {displayMode === 'overlay' && (
               <div className={`lyrics-layer overlay ${layerStyle}`}>{lyricsBlock}</div>
+            )}
+            {tv && current && (
+              <div className="nextup">
+                <span className="nextup-now">▶ {nowPlayingLabel}</span>
+                {upNext ? (
+                  <span className="nextup-next">
+                    Next: {songLabel(upNext)}
+                    {queue.items.length > 2 ? ` · +${queue.items.length - 2} more` : ''}
+                  </span>
+                ) : (
+                  <span className="nextup-next dim">Last song in the queue</span>
+                )}
+              </div>
             )}
             {toast && <div className="toast">{toast}</div>}
           </div>
@@ -377,7 +536,7 @@ export default function App() {
 
       {inspectorOpen && current && videoId && (
         <LyricsInspector
-          key={current.id}
+          key={playKey}
           videoId={videoId}
           title={current.title}
           status={lyricsStatus}
@@ -404,6 +563,16 @@ export default function App() {
         <span className="state-chip">{playerState}</span>
         {nowPlayingLabel && <span className="now-playing-chip">▶ {nowPlayingLabel}</span>}
         {result?.warning && <span className="warning-chip">⚠ {result.warning}</span>}
+        {driftSuggestion && (
+          <button
+            className="chip-btn"
+            title={`Switch this queue slot to “${driftSuggestion.title}” (${driftSuggestion.channel})`}
+            onClick={() => replaceCurrent(driftSuggestion)}
+          >
+            ♪ Use Topic upload
+            {driftSuggestion.durationS ? ` (${formatDuration(driftSuggestion.durationS)})` : ''}
+          </button>
+        )}
         {loadError && <span className="warning-chip">⚠ {loadError}</span>}
         <span className="muted spacer" />
         <span className="muted">
@@ -412,4 +581,23 @@ export default function App() {
       </footer>
     </div>
   );
+}
+
+/** Topic-upload suggestion for `videoId` (null = not wanted / none found). */
+function useTopicSuggestion(videoId: string | null): TopicSuggestion | null {
+  const [state, setState] = useState<{ videoId: string; s: TopicSuggestion | null } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!videoId) return;
+    let alive = true;
+    window.karaoke
+      .suggestTopic(videoId)
+      .then((s) => alive && setState({ videoId, s }))
+      .catch(() => alive && setState({ videoId, s: null }));
+    return () => {
+      alive = false;
+    };
+  }, [videoId]);
+  return state && state.videoId === videoId ? state.s : null;
 }

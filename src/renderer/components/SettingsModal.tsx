@@ -1,18 +1,22 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   PROVIDER_IDS,
   type AppInfo,
+  type InstallProgress,
   type LyricsMode,
   type ProviderId,
   type RubyMode,
   type Settings,
   type SettingsPatch,
+  type YtDlpStatus,
 } from '../../shared/ipc';
+import { ipcErrorMessage } from '../ipcError';
 
 // Settings modal (SPEC.md §7): lyrics display style, provider toggles,
-// Ollama endpoint/model, cache folder info. Changes save immediately
-// (toggles / radios) or on blur/Enter (text fields); the App owns the
-// settings state and hands back whatever main returns after each write.
+// Ollama endpoint/model, yt-dlp (search) status + download, cache folder
+// info. Changes save immediately (toggles / radios) or on blur/Enter (text
+// fields); the App owns the settings state and hands back whatever main
+// returns after each write.
 
 interface Props {
   appInfo: AppInfo | null;
@@ -43,6 +47,12 @@ const PROVIDER_LABEL: Record<ProviderId, string> = {
   netease: 'NetEase Cloud Music (large CJK library, unofficial)',
 };
 
+const ORIGIN_LABEL: Record<NonNullable<YtDlpStatus['origin']>, string> = {
+  settings: 'custom path',
+  managed: 'app-managed copy',
+  path: 'found on PATH',
+};
+
 export default function SettingsModal({ appInfo, settings, onSave, onClose }: Props) {
   const [endpoint, setEndpoint] = useState(settings.ollama.endpoint);
   const [model, setModel] = useState(settings.ollama.model);
@@ -69,7 +79,7 @@ export default function SettingsModal({ appInfo, settings, onSave, onClose }: Pr
         setFlash('Saved');
         setTimeout(() => setFlash(null), 1200);
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+      .catch((err: unknown) => setError(ipcErrorMessage(err)));
   };
 
   const saveOllamaText = () => {
@@ -131,80 +141,171 @@ export default function SettingsModal({ appInfo, settings, onSave, onClose }: Pr
           </p>
         </section>
 
-        {
-          <>
-            <section>
-              <h3>Lyrics providers</h3>
-              <p className="muted">
-                Both are tried for every song; the order follows the detected language
-                (Japanese/Korean → NetEase first).
-              </p>
-              {PROVIDER_IDS.map((id) => (
-                <label key={id} className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={settings.providers[id]}
-                    onChange={(e) => save({ providers: { [id]: e.target.checked } })}
-                  />
-                  <span>{PROVIDER_LABEL[id]}</span>
-                </label>
-              ))}
-            </section>
+        <section>
+          <h3>Lyrics providers</h3>
+          <p className="muted">
+            Both are tried for every song; the order follows the detected language
+            (Japanese/Korean → NetEase first).
+          </p>
+          {PROVIDER_IDS.map((id) => (
+            <label key={id} className="check-row">
+              <input
+                type="checkbox"
+                checked={settings.providers[id]}
+                onChange={(e) => save({ providers: { [id]: e.target.checked } })}
+              />
+              <span>{PROVIDER_LABEL[id]}</span>
+            </label>
+          ))}
+        </section>
 
-            <section>
-              <h3>Ollama title parsing (optional)</h3>
-              <p className="muted">
-                When the heuristic title parser is unsure, ask a local Ollama model for
-                artist/track. Never required — any error or timeout falls back to heuristics.
-              </p>
-              <label className="check-row">
-                <input
-                  type="checkbox"
-                  checked={settings.ollama.enabled}
-                  onChange={(e) => save({ ollama: { enabled: e.target.checked } })}
-                />
-                <span>Enable Ollama assist</span>
-              </label>
-              <div className="insp-meta">
-                <label className="field">
-                  <span>Endpoint</span>
-                  <input
-                    value={endpoint}
-                    placeholder="http://localhost:11434"
-                    onChange={(e) => setEndpoint(e.target.value)}
-                    onBlur={saveOllamaText}
-                    onKeyDown={(e) => e.key === 'Enter' && saveOllamaText()}
-                  />
-                </label>
-                <label className="field">
-                  <span>Model</span>
-                  <input
-                    value={model}
-                    placeholder="llama3.1"
-                    onChange={(e) => setModel(e.target.value)}
-                    onBlur={saveOllamaText}
-                    onKeyDown={(e) => e.key === 'Enter' && saveOllamaText()}
-                  />
-                </label>
-              </div>
-            </section>
+        <section>
+          <h3>Ollama title parsing (optional)</h3>
+          <p className="muted">
+            When the heuristic title parser is unsure, ask a local Ollama model for
+            artist/track. Never required — any error or timeout falls back to heuristics.
+          </p>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={settings.ollama.enabled}
+              onChange={(e) => save({ ollama: { enabled: e.target.checked } })}
+            />
+            <span>Enable Ollama assist</span>
+          </label>
+          <div className="insp-meta">
+            <label className="field">
+              <span>Endpoint</span>
+              <input
+                value={endpoint}
+                placeholder="http://localhost:11434"
+                onChange={(e) => setEndpoint(e.target.value)}
+                onBlur={saveOllamaText}
+                onKeyDown={(e) => e.key === 'Enter' && saveOllamaText()}
+              />
+            </label>
+            <label className="field">
+              <span>Model</span>
+              <input
+                value={model}
+                placeholder="llama3.1"
+                onChange={(e) => setModel(e.target.value)}
+                onBlur={saveOllamaText}
+                onKeyDown={(e) => e.key === 'Enter' && saveOllamaText()}
+              />
+            </label>
+          </div>
+        </section>
 
-            <section>
-              <h3>Cache</h3>
-              <p className="muted">
-                Metadata, lyrics, offsets and the queue live in one SQLite file:
-              </p>
-              <pre className="raw-lrc small">
-                {appInfo ? `${appInfo.dbPath}  (schema v${appInfo.schemaVersion})` : '…'}
-              </pre>
-            </section>
-          </>
-        }
+        <YtDlpSection settings={settings} save={save} />
+
+        <section>
+          <h3>Cache</h3>
+          <p className="muted">
+            Metadata, lyrics, offsets and the queue live in one SQLite file:
+          </p>
+          <pre className="raw-lrc small">
+            {appInfo ? `${appInfo.dbPath}  (schema v${appInfo.schemaVersion})` : '…'}
+          </pre>
+        </section>
 
         <footer className="modal-foot">
           {error && <span className="warning-chip">⚠ {error}</span>}
         </footer>
       </div>
     </div>
+  );
+}
+
+/** yt-dlp status, app-managed download/update, and the custom-path override. */
+function YtDlpSection({
+  settings,
+  save,
+}: {
+  settings: Settings;
+  save(patch: SettingsPatch): void;
+}) {
+  const [status, setStatus] = useState<YtDlpStatus | null>(null);
+  const [path, setPath] = useState(settings.ytdlp.path);
+  const [progress, setProgress] = useState<InstallProgress | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(() => {
+    window.karaoke.searchStatus().then(setStatus).catch(console.error);
+  }, []);
+  useEffect(refresh, [refresh, settings.ytdlp.path]);
+  useEffect(() => window.karaoke.onInstallProgress(setProgress), []);
+
+  const install = () => {
+    setBusy(true);
+    setProgress(null);
+    window.karaoke
+      .searchInstall()
+      .then(setStatus)
+      .catch((err: unknown) =>
+        setProgress({ phase: 'error', percent: 0, message: ipcErrorMessage(err) }),
+      )
+      .finally(() => setBusy(false));
+  };
+
+  const savePath = () => {
+    if (path.trim() !== settings.ytdlp.path) save({ ytdlp: { path: path.trim() } });
+  };
+
+  const line = !status
+    ? '…'
+    : status.available
+      ? `✓ yt-dlp ${status.version} · ${status.origin ? ORIGIN_LABEL[status.origin] : ''}`
+      : `✗ ${status.error ?? 'not available'}`;
+
+  return (
+    <section>
+      <h3>Search (yt-dlp)</h3>
+      <p className="muted">
+        YouTube search and the “Artist - Topic” suggestions run through yt-dlp. The app can
+        keep its own copy (downloaded from the official GitHub release into its data folder,
+        ~50 MB) or use one you installed — apps started from Finder don’t see your shell
+        PATH, so set the full path below if it isn’t found.
+      </p>
+      <div className={`ytdlp-status ${status && !status.available ? 'bad' : ''}`}>
+        <span>{line}</span>
+        {status?.path && <span className="muted ytdlp-path">{status.path}</span>}
+      </div>
+      <div className="insp-actions">
+        <button className="url-load" onClick={install} disabled={busy}>
+          {busy
+            ? 'Working…'
+            : status?.origin === 'managed'
+              ? 'Update app-managed yt-dlp'
+              : 'Download app-managed yt-dlp'}
+        </button>
+        {status?.error && status.available && (
+          <span className="warning-chip">⚠ {status.error}</span>
+        )}
+      </div>
+      {progress && (
+        <div className={`ytdlp-progress ${progress.phase === 'error' ? 'bad' : ''}`}>
+          <div>{progress.message}</div>
+          {progress.phase !== 'error' && progress.phase !== 'done' && (
+            <div className="progress">
+              <i style={{ width: `${progress.percent}%` }} />
+            </div>
+          )}
+        </div>
+      )}
+      <div className="insp-meta">
+        <label className="field">
+          <span>Custom yt-dlp path (blank = automatic)</span>
+          <input
+            value={path}
+            placeholder="/opt/homebrew/bin/yt-dlp"
+            onChange={(e) => setPath(e.target.value)}
+            onBlur={savePath}
+            onKeyDown={(e) => e.key === 'Enter' && savePath()}
+            spellCheck={false}
+          />
+        </label>
+      </div>
+    </section>
   );
 }

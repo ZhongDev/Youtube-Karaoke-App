@@ -26,7 +26,10 @@ export function useQueue() {
 
   const actions = useMemo(
     () => ({
-      add: (input: string, mode: QueueAddMode) => window.karaoke.queueAdd(input, mode),
+      add: (input: string, mode: QueueAddMode, durationS?: number) =>
+        window.karaoke.queueAdd(input, mode, durationS),
+      replace: (id: number, videoId: string, durationS?: number) =>
+        window.karaoke.queueReplace(id, videoId, durationS),
       remove: (id: number) => window.karaoke.queueRemove(id),
       move: (id: number, toIndex: number) => window.karaoke.queueMove(id, toIndex),
       play: (id: number) => window.karaoke.queuePlay(id),
