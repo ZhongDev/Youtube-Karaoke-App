@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  AlignKind,
   AppInfo,
   QueueAddMode,
   QueueItem,
   ResolveResult,
   TopicSuggestion,
 } from '../shared/ipc';
+import { formatOffset } from '../shared/autoOffset';
 import { parseLrc } from '../shared/lrc';
 import { SyncClock } from '../shared/syncClock';
 import LyricsDisplay, { type LyricsStatus } from './components/LyricsDisplay';
@@ -16,8 +18,9 @@ import SearchBar from './components/SearchBar';
 import SettingsModal from './components/SettingsModal';
 import TvButton from './components/TvButton';
 import { ipcErrorMessage } from './ipcError';
-import { isAlignActive, overallPercent, useAlign } from './useAlign';
+import { KIND_LABEL, isAlignActive, overallPercent, useAlign } from './useAlign';
 import { useQueue } from './useQueue';
+import { useRuby } from './useRuby';
 import { useSettings } from './useSettings';
 import { formatDuration, formatTime } from './youtube';
 
@@ -74,6 +77,11 @@ export default function App() {
   offsetMsRef.current = offsetMs;
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((message: string, ms = 1600) => {
+    setToast(message);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), ms);
+  }, []);
 
   const [displayMode, setDisplayMode] = useState<'overlay' | 'panel'>('overlay');
   const [queueOpen, setQueueOpen] = useState(true);
@@ -311,34 +319,55 @@ export default function App() {
       setOffsetMs(next);
       window.karaoke.setOffset(videoId, next).catch(console.error);
       const sign = next > 0 ? '+' : '';
-      setToast(
+      showToast(
         next === 0
           ? 'Offset reset'
           : `Offset ${sign}${next} ms (lyrics ${next > 0 ? 'earlier' : 'later'})`,
       );
-      if (toastTimer.current) clearTimeout(toastTimer.current);
-      toastTimer.current = setTimeout(() => setToast(null), 1600);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [videoId, setFullscreen]);
+  }, [videoId, setFullscreen, showToast]);
 
-  // Background alignment jobs (Phase 5): a finished job for the playing song
-  // re-resolves it so the new word-synced document takes over live.
+  // Background worker jobs (Phases 5–6): a finished job for the playing song
+  // re-resolves it so the new document (or the auto-offset) takes over live.
   const align = useAlign();
   const activeJob = align.jobs.find((j) => isAlignActive(j.stage)) ?? null;
   const currentJob = videoId ? (align.jobs.find((j) => j.videoId === videoId) ?? null) : null;
+  const currentJobActive = currentJob !== null && isAlignActive(currentJob.stage);
   const currentJobDoneAt = currentJob?.stage === 'done' ? currentJob.finishedAt : null;
   useEffect(() => {
     if (!currentJobDoneAt || !videoId || !playKey) return;
     resolve(videoId, playKey);
-  }, [currentJobDoneAt, videoId, playKey, resolve]);
+    if (currentJob?.kind === 'offset' && currentJob.offsetMs !== null) {
+      showToast(`Auto-offset applied: ${formatOffset(currentJob.offsetMs)}`, 4000);
+    }
+    // (`currentJob` comes from the same snapshot as currentJobDoneAt.)
+  }, [currentJobDoneAt, videoId, playKey, resolve, showToast]); // eslint-disable-line
+
+  const startJob = useCallback(
+    (kind: AlignKind) => {
+      if (!videoId) return;
+      setLoadError(null);
+      window.karaoke.alignStart(videoId, kind).catch((err: unknown) => {
+        setLoadError(ipcErrorMessage(err));
+      });
+    },
+    [videoId],
+  );
 
   const parsed = useMemo(() => {
     const doc = result?.lyrics;
     if (!doc || doc.kind === 'plain') return null;
     return parseLrc(doc.body);
   }, [result]);
+
+  const rubyDoc = useRuby(
+    videoId,
+    result?.lyrics ?? null,
+    settings.display.ruby,
+    result?.track.language ?? null,
+  );
 
   // Drift (SPEC.md §8): the lyrics are timed for a recording of a different
   // length → offer the Topic upload as a one-click switch (never automatic).
@@ -376,7 +405,7 @@ export default function App() {
       clock={clockRef.current}
       offsetMsRef={offsetMsRef}
       mode={lyricsMode}
-      ruby={settings.display.ruby}
+      rubyDoc={rubyDoc}
     />
   );
   // Two-track lanes own the bottom 40% of the stage; the scroll window and
@@ -604,11 +633,29 @@ export default function App() {
             {driftSuggestion.durationS ? ` (${formatDuration(driftSuggestion.durationS)})` : ''}
           </button>
         )}
+        {result?.driftS !== null && result?.driftS !== undefined && parsed && !currentJobActive && (
+          <button
+            className="chip-btn"
+            title="Find the first lyric lines in this video's opening vocals and set the offset (local Whisper job)"
+            onClick={() => startJob('offset')}
+          >
+            ⏱ Auto-offset
+          </button>
+        )}
+        {lyricsStatus === 'done' && !result?.lyrics && !currentJobActive && (
+          <button
+            className="chip-btn"
+            title="Whisper writes word-synced lyrics from the isolated vocals — raw and unedited (local job)"
+            onClick={() => startJob('transcribe')}
+          >
+            🎤 Transcribe from audio
+          </button>
+        )}
         {loadError && <span className="warning-chip">⚠ {loadError}</span>}
         {activeJob && (
           <span
             className="align-chip"
-            title={`Aligning “${activeJob.title}” from ${activeJob.source} with Whisper ${activeJob.model}`}
+            title={`${KIND_LABEL[activeJob.kind]} · “${activeJob.title}”${activeJob.source ? ` from ${activeJob.source}` : ''} · Whisper ${activeJob.model}`}
           >
             ⚙ {overallPercent(activeJob)}% · {activeJob.message}
           </span>

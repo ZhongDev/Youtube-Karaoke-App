@@ -1,23 +1,34 @@
 #!/usr/bin/env python3
-"""Forced-alignment worker (SPEC.md §5, Tier 3).
+"""Local audio worker (SPEC.md §5 Tier 3, Phases 5–6).
 
-Turns (YouTube audio + known lyric text) into word-level enhanced LRC:
-
-    yt-dlp bestaudio → ffmpeg → wav → Demucs (vocals) → stable-ts align → LRC
+    yt-dlp bestaudio → ffmpeg → wav → Demucs (vocals) → stable-ts → result
 
 Protocol (the Node side owns the job queue; this process does exactly one job):
   stdin  : one JSON object
-             { "videoId": "...", "text": "line\nline\n…", "language": "en"|"ja"|"ko"|null,
-               "model": "large-v3", "device": "auto"|"cpu"|"mps",
-               "ytdlp": "/path/to/yt-dlp", "workDir": "/tmp/…", "keepAudio": false }
+             { "videoId": "...", "mode": "align"|"transcribe"|"offset",
+               "text": "line\nline\n…",            # align / offset only
+               "language": "en"|"ja"|"ko"|null, "model": "large-v3", "device": "auto"|"cpu",
+               "ytdlp": "/path/to/yt-dlp", "workDir": "/tmp/…",
+               "maxSeconds": 90|null,             # offset: decode only the opening stretch
+               "keepAudio": false }
   stdout : NDJSON events, one per line
-             {"event":"progress","stage":"download|decode|separate|load|align","percent":0-100,"message":"…"}
-             {"event":"result","ok":true,"enhancedLrc":"…","warnings":[…]}
-             {"event":"result","ok":false,"error":"…"}
+             {"event":"progress","stage":"download|decode|separate|load|align|transcribe","percent":0-100,"message":"…"}
+             align      {"event":"result","ok":true,"enhancedLrc":"…","warnings":[…]}
+             transcribe {"event":"result","ok":true,"enhancedLrc":"…","language":"ja","warnings":[…]}
+             offset     {"event":"result","ok":true,"heard":[{"text":"…","startS":24.2},…],
+                         "energyOnsetS":24.1,"warnings":[…]}
+             any        {"event":"result","ok":false,"error":"…"}
   stderr : library chatter (torch / whisper warnings) — logged by the caller.
 
-Alignment is against the *known* text (not free transcription): every lyric
-line becomes one LRC line with a <mm:ss.xx> tag per word.
+Modes:
+  align       forced alignment of the *known* text: every lyric line becomes
+              one LRC line with a <mm:ss.xx> tag per word.
+  transcribe  no text at all: Whisper transcribes the isolated vocals and each
+              segment becomes an LRC line (raw fallback when no lyrics exist).
+  offset      the opening `maxSeconds` of the video are transcribed; the
+              caller looks for its first lyric lines in what was heard (with
+              a crude energy onset as the fallback) to work out how long the
+              intro is. `text` is only used to decide the window.
 """
 from __future__ import annotations
 
@@ -86,14 +97,17 @@ def download_audio(ytdlp: str, video_id: str, work: Path) -> Path:
 # ── stage 2: decode to wav ──
 
 
-def decode_to_wav(src: Path, work: Path) -> Path:
+def decode_to_wav(src: Path, work: Path, max_seconds: float | None) -> Path:
     import imageio_ffmpeg
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     dst = work / "audio.wav"
     progress("decode", 0, "Decoding audio…")
     # Demucs wants 44.1 kHz stereo; float wav keeps it lossless.
-    cmd = [ffmpeg, "-y", "-v", "error", "-i", str(src), "-ac", "2", "-ar", "44100", "-c:a", "pcm_f32le", str(dst)]
+    cmd = [ffmpeg, "-y", "-v", "error", "-i", str(src)]
+    if max_seconds:
+        cmd += ["-t", f"{max_seconds:.2f}"]
+    cmd += ["-ac", "2", "-ar", "44100", "-c:a", "pcm_f32le", str(dst)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0 or not dst.exists():
         raise RuntimeError("ffmpeg failed: " + (r.stderr.strip().splitlines() or ["unknown error"])[-1])
@@ -164,7 +178,7 @@ def separate_vocals(wav_path: Path, device: str, work: Path):
     return vocals.cpu(), sr
 
 
-# ── stage 4/5: alignment ──
+# ── stage 4: Whisper ──
 
 
 def to_whisper_audio(vocals, sr: int):
@@ -178,7 +192,8 @@ def to_whisper_audio(vocals, sr: int):
     return mono.clamp(-1, 1).to(torch.float32).numpy()
 
 
-def align_lyrics(audio16k, text: str, language: str | None, model_name: str, device: str):
+def load_whisper(model_name: str, device: str):
+    """Returns (model, device actually used)."""
     import stable_whisper
 
     progress("load", 0, f"Loading Whisper {model_name} ({device})… first use downloads the model")
@@ -191,7 +206,23 @@ def align_lyrics(audio16k, text: str, language: str | None, model_name: str, dev
         device = "cpu"
         model = stable_whisper.load_model(model_name, device=device)
     progress("load", 100, f"Whisper {model_name} ready")
+    return model, device
 
+
+def with_cpu_retry(fn, model, device: str, model_name: str, what: str):
+    """Run fn(model) — on an MPS op gap, reload on CPU and try once more."""
+    try:
+        return fn(model)
+    except Exception as e:  # noqa: BLE001
+        if device == "cpu":
+            raise
+        warn(f"Whisper {what} on {device} failed ({type(e).__name__}: {str(e)[:120]}); retrying on CPU")
+        import stable_whisper
+
+        return fn(stable_whisper.load_model(model_name, device="cpu"))
+
+
+def align_lyrics(model, device: str, model_name: str, audio16k, text: str, language: str | None):
     total_s = len(audio16k) / 16000
 
     def on_progress(seek: float, total: float) -> None:
@@ -199,17 +230,62 @@ def align_lyrics(audio16k, text: str, language: str | None, model_name: str, dev
 
     progress("align", 0, f"Aligning lyrics ({device})… ({total_s:.0f}s)")
     kwargs = dict(language=language, original_split=True, verbose=None, progress_callback=on_progress)
-    try:
-        result = model.align(audio16k, text, **kwargs)
-    except Exception as e:  # noqa: BLE001
-        if device != "cpu":
-            warn(f"Whisper on {device} failed ({type(e).__name__}: {str(e)[:120]}); retrying on CPU")
-            model = stable_whisper.load_model(model_name, device="cpu")
-            result = model.align(audio16k, text, **kwargs)
-        else:
-            raise
+    result = with_cpu_retry(lambda m: m.align(audio16k, text, **kwargs), model, device, model_name, "alignment")
     progress("align", 100, "Alignment done")
     return result
+
+
+def transcribe_lyrics(model, device: str, model_name: str, audio16k, language: str | None):
+    total_s = len(audio16k) / 16000
+
+    def on_progress(seek: float, total: float) -> None:
+        progress("transcribe", 100 * seek / max(total, 1e-6), f"Transcribing ({device})… {int(100 * seek / max(total, 1e-6))}%")
+
+    progress("transcribe", 0, f"Transcribing vocals ({device})… ({total_s:.0f}s)")
+    # No conditioning on previous text: sung repetition otherwise sends the
+    # decoder into loops of the same line.
+    kwargs = dict(
+        language=language, word_timestamps=True, regroup=True, vad=False, suppress_silence=True,
+        condition_on_previous_text=False, verbose=None, progress_callback=on_progress,
+    )
+    result = with_cpu_retry(lambda m: m.transcribe(audio16k, **kwargs), model, device, model_name, "transcription")
+    progress("transcribe", 100, "Transcription done")
+    return result
+
+
+# ── offset helpers ──
+
+
+def energy_onset(audio16k, frame_ms: int = 50, min_frames: int = 4) -> float | None:
+    """First moment the (isolated) vocals stay above a tenth of their loud
+    level for min_frames frames — crude, but immune to alignment mishaps."""
+    import numpy as np
+
+    frame = 16000 * frame_ms // 1000
+    n = len(audio16k) // frame
+    if n == 0:
+        return None
+    rms = np.sqrt((audio16k[: n * frame].reshape(n, frame) ** 2).mean(axis=1))
+    loud = float(np.percentile(rms, 95))
+    if loud < 1e-4:
+        return None
+    thr = max(0.10 * loud, 0.003)
+    run = 0
+    for i, v in enumerate(rms):
+        run = run + 1 if v >= thr else 0
+        if run >= min_frames:
+            return (i - min_frames + 1) * frame_ms / 1000
+    return None
+
+
+def heard_lines(result) -> list[dict]:
+    """What Whisper heard, segment by segment, for the caller to match
+    against the lyric lines it is looking for."""
+    return [
+        {"text": (seg.text or "").strip(), "startS": float(seg.start), "endS": float(seg.end)}
+        for seg in result.segments
+        if (seg.text or "").strip()
+    ]
 
 
 # ── output ──
@@ -222,13 +298,14 @@ def fmt(t: float) -> str:
     return f"{m:02d}:{s:05.2f}"
 
 
-def to_enhanced_lrc(result, lines: list[str]) -> str:
-    """One LRC line per reference line, <tag> per word. Words keep their leading
-    space (Latin) or none (CJK) so the app's parser re-joins text exactly."""
-    out = ["[re:karaoke-align]"]
+def to_enhanced_lrc(result, lines: list[str] | None, header: str) -> str:
+    """One LRC line per segment (= per reference line when aligning), <tag>
+    per word. Words keep their leading space (Latin) or none (CJK) so the
+    app's parser re-joins text exactly."""
+    out = [f"[re:{header}]"]
     unaligned = 0
-    segs = list(result.segments)
-    for i, seg in enumerate(segs):
+    segs = [s for s in result.segments if (s.text or "").strip()]
+    for seg in segs:
         words = [w for w in (seg.words or []) if (w.word or "").strip()]
         if not words:
             unaligned += 1
@@ -240,7 +317,7 @@ def to_enhanced_lrc(result, lines: list[str]) -> str:
             lead = " " if j > 0 and token.startswith(" ") else ""
             parts.append(f"{lead}<{fmt(w.start)}>{token.strip()}")
         out.append("".join(parts))
-    if len(segs) != len(lines):
+    if lines is not None and len(segs) != len(lines):
         warn(f"{len(lines)} reference lines became {len(segs)} aligned segments")
     if unaligned:
         warn(f"{unaligned} line(s) had no word timings")
@@ -250,28 +327,50 @@ def to_enhanced_lrc(result, lines: list[str]) -> str:
 def main() -> int:
     job = json.loads(sys.stdin.read() or "{}")
     video_id = job["videoId"]
+    mode = job.get("mode") or "align"
     lines = [l.strip() for l in str(job.get("text", "")).splitlines() if l.strip()]
-    if not lines:
+    if mode != "transcribe" and not lines:
         emit({"event": "result", "ok": False, "error": "No lyric text to align"})
         return 1
     work = Path(job.get("workDir") or Path.cwd() / "align-work" / video_id)
     work.mkdir(parents=True, exist_ok=True)
     language = job.get("language") or None
     model_name = job.get("model") or "large-v3"
+    max_seconds = job.get("maxSeconds") if mode == "offset" else None
     demucs_device, whisper_device = pick_devices(job.get("device") or "auto")
     try:
         wav = work / "audio.wav"
         if not wav.exists():
             src = download_audio(job["ytdlp"], video_id, work)
-            wav = decode_to_wav(src, work)
+            wav = decode_to_wav(src, work, max_seconds)
         vocals, sr = separate_vocals(wav, demucs_device, work)
         audio16k = to_whisper_audio(vocals, sr)
-        result = align_lyrics(audio16k, "\n".join(lines), language, model_name, whisper_device)
-        lrc = to_enhanced_lrc(result, lines)
+        model, whisper_device = load_whisper(model_name, whisper_device)
+
+        if mode == "transcribe":
+            result = transcribe_lyrics(model, whisper_device, model_name, audio16k, language)
+            lrc = to_enhanced_lrc(result, None, "karaoke-transcribe")
+            if len(lrc.splitlines()) <= 1:
+                raise RuntimeError("Whisper heard no words in the isolated vocals")
+            out = {"event": "result", "ok": True, "enhancedLrc": lrc, "language": getattr(result, "language", None), "warnings": WARNINGS}
+        elif mode == "offset":
+            energy = energy_onset(audio16k)
+            heard: list[dict] = []
+            try:
+                result = transcribe_lyrics(model, whisper_device, model_name, audio16k, language)
+                heard = heard_lines(result)
+            except Exception as e:  # noqa: BLE001 — the energy onset still gives an answer
+                warn(f"Transcription failed ({type(e).__name__}: {str(e)[:120]})")
+            out = {"event": "result", "ok": True, "heard": heard, "energyOnsetS": energy, "warnings": WARNINGS}
+        else:
+            result = align_lyrics(model, whisper_device, model_name, audio16k, "\n".join(lines), language)
+            lrc = to_enhanced_lrc(result, lines, "karaoke-align")
+            out = {"event": "result", "ok": True, "enhancedLrc": lrc, "warnings": WARNINGS}
+
         if not job.get("keepAudio"):
             for p in work.glob("audio.*"):
                 p.unlink(missing_ok=True)
-        emit({"event": "result", "ok": True, "enhancedLrc": lrc, "warnings": WARNINGS})
+        emit(out)
         return 0
     except Exception as e:  # noqa: BLE001
         traceback.print_exc(file=sys.stderr)

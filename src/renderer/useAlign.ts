@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AlignJob, AlignSnapshot, AlignStage } from '../shared/ipc';
+import type { AlignJob, AlignKind, AlignSnapshot, AlignStage } from '../shared/ipc';
 
 // Renderer view of the main-owned alignment job list. Main pushes a full
 // snapshot on every change (throttled); the initial alignGet() fills the
@@ -36,6 +36,7 @@ export const STAGE_LABEL: Record<AlignStage, string> = {
   separate: 'Isolating vocals',
   load: 'Loading Whisper',
   align: 'Aligning words',
+  transcribe: 'Transcribing',
   done: 'Done',
   error: 'Failed',
   cancelled: 'Cancelled',
@@ -50,6 +51,13 @@ const STAGE_SPAN: Partial<Record<AlignStage, [number, number]>> = {
   separate: [18, 50],
   load: [50, 60],
   align: [60, 100],
+  transcribe: [60, 100],
+};
+
+export const KIND_LABEL: Record<AlignKind, string> = {
+  align: 'Align lyrics',
+  transcribe: 'Transcribe',
+  offset: 'Auto-offset',
 };
 
 export function overallPercent(job: AlignJob): number {

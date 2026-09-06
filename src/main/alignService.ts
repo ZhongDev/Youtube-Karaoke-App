@@ -4,18 +4,31 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { app } from 'electron';
 import { referenceText } from '../shared/alignText';
-import type { AlignJob, AlignSnapshot, AlignStage } from '../shared/ipc';
+import {
+  estimateOffset,
+  formatOffset,
+  MAX_PLAUSIBLE_OFFSET_MS,
+  offsetProbe,
+  type HeardLine,
+  type OffsetProbe,
+} from '../shared/autoOffset';
+import type { AlignJob, AlignKind, AlignSnapshot, AlignStage } from '../shared/ipc';
+import { detectTrackLanguage } from '../shared/language';
+import { parseLrc } from '../shared/lrc';
 import type { Repo } from './repo';
 import type { SettingsStore } from './settings';
 import { augmentedPath, errorMessage } from './tools';
 import type { Uv } from './uv';
 import type { YtDlp } from './ytdlp';
 
-// Tier-3 job queue (SPEC.md §5, Phase 5): one forced alignment at a time
-// (it is CPU/GPU heavy), entirely in the background — playback never waits
-// on it. Each job spawns worker/align.py once with the reference text on
-// stdin; progress streams back as NDJSON and the result is stored as source
-// 'aligned' / kind synced_word, which best-by-rank then makes active.
+// Tier-3 job queue (SPEC.md §5, Phase 5 + 6): one worker job at a time (it
+// is CPU/GPU heavy), entirely in the background — playback never waits on
+// it. Each job spawns worker/align.py once with a JSON payload on stdin;
+// progress streams back as NDJSON. Three job kinds share the pipeline:
+//   align      known text → source 'aligned' (synced_word), best-by-rank active
+//   transcribe no text → source 'transcribed' (synced_word), pinned active
+//   offset     first lines found in a transcription of the opening audio →
+//              per-video offset applied
 
 const BROADCAST_MIN_MS = 150;
 const KILL_GRACE_MS = 3000;
@@ -27,11 +40,24 @@ interface WorkerEvent {
   message?: string;
   ok?: boolean;
   enhancedLrc?: string;
+  /** transcribe: Whisper's detected language code. */
+  language?: string | null;
+  /** offset: what Whisper heard in the probe window, segment by segment. */
+  heard?: HeardLine[];
+  /** offset: first sustained vocal energy, the fallback anchor. */
+  energyOnsetS?: number | null;
   error?: string;
   warnings?: string[];
 }
 
-const WORKER_STAGES: readonly AlignStage[] = ['download', 'decode', 'separate', 'load', 'align'];
+const WORKER_STAGES: readonly AlignStage[] = [
+  'download',
+  'decode',
+  'separate',
+  'load',
+  'align',
+  'transcribe',
+];
 
 export function isAlignActive(stage: AlignStage): boolean {
   return stage !== 'done' && stage !== 'error' && stage !== 'cancelled';
@@ -58,31 +84,55 @@ export class AlignService {
     return { jobs: [...this.jobs.values()].sort((a, b) => b.startedAt - a.startedAt) };
   }
 
-  start(videoId: string, source: string): AlignSnapshot {
+  /**
+   * Queue a job. `source` names the lyrics to use: required for 'align',
+   * optional for 'offset' (defaults to the active lyrics), ignored for
+   * 'transcribe'. Validation happens here so the renderer gets an error
+   * straight away rather than a failed job.
+   */
+  start(videoId: string, kind: AlignKind, source: string | null): AlignSnapshot {
     const row = this.repo.getTrack(videoId);
     if (!row) throw new Error('Unknown video — play or queue it first');
-    const doc = this.repo.getLyrics(videoId).find((d) => d.source === source);
-    if (!doc) throw new Error(`No "${source}" lyrics stored for this video`);
-    if (!referenceText(doc.body)) throw new Error('That source has no lyric text to align');
     const existing = this.jobs.get(videoId);
-    if (existing && isAlignActive(existing.stage)) throw new Error('Already aligning this video');
+    if (existing && isAlignActive(existing.stage)) throw new Error('A job is already running for this video');
+
+    let src = '';
+    if (kind === 'align') {
+      if (!source) throw new Error('Pick the lyrics to align');
+      const doc = this.repo.getLyrics(videoId).find((d) => d.source === source);
+      if (!doc) throw new Error(`No "${source}" lyrics stored for this video`);
+      if (!referenceText(doc.body)) throw new Error('That source has no lyric text to align');
+      src = source;
+    } else if (kind === 'offset') {
+      const doc = source
+        ? this.repo.getLyrics(videoId).find((d) => d.source === source)
+        : this.repo.activeLyrics(videoId);
+      if (!doc) throw new Error('No lyrics to estimate an offset for');
+      if (doc.kind === 'plain') throw new Error('Auto-offset needs time-synced lyrics');
+      if (!offsetProbe(parseLrc(doc.body)?.lines ?? [])) {
+        throw new Error('The lyrics have no sung lines to align');
+      }
+      src = doc.source;
+    }
 
     const job: AlignJob = {
       videoId,
+      kind,
       title: row.artist && row.track ? `${row.artist} — ${row.track}` : row.title || videoId,
-      source,
+      source: src,
       model: this.settings.get().align.model,
       stage: 'queued',
       percent: 0,
       message: this.running ? 'Waiting for the current job…' : 'Starting…',
       error: null,
       warnings: [],
+      offsetMs: null,
       startedAt: Date.now(),
       finishedAt: null,
     };
     this.jobs.set(videoId, job);
     this.pending.push(videoId);
-    console.log(`[align] queued ${videoId} from "${source}" (${job.model})`);
+    console.log(`[align] queued ${kind} ${videoId}${src ? ` from "${src}"` : ''} (${job.model})`);
     this.broadcast(true);
     void this.drain();
     return this.snapshot();
@@ -148,19 +198,36 @@ export class AlignService {
     if (!ytdlp) throw new Error('yt-dlp is not installed — set it up under Settings → Search');
 
     const row = this.repo.getTrack(videoId);
-    const doc = this.repo.getLyrics(videoId).find((d) => d.source === job.source);
-    if (!row || !doc) throw new Error('The reference lyrics are gone');
+    if (!row) throw new Error('The video is gone');
+    const doc =
+      job.kind === 'transcribe'
+        ? null
+        : this.repo.getLyrics(videoId).find((d) => d.source === job.source);
+    if (job.kind !== 'transcribe' && !doc) throw new Error('The reference lyrics are gone');
+
+    let text = '';
+    let probe: OffsetProbe | null = null;
+    if (job.kind === 'align') {
+      text = referenceText(doc!.body);
+    } else if (job.kind === 'offset') {
+      probe = offsetProbe(parseLrc(doc!.body)?.lines ?? []);
+      if (!probe) throw new Error('The lyrics have no sung lines to align');
+      text = probe.text;
+    }
 
     const workDir = path.join(app.getPath('temp'), 'karaoke-align', videoId);
     await fs.promises.mkdir(workDir, { recursive: true });
     const payload = {
       videoId,
-      text: referenceText(doc.body),
+      mode: job.kind,
+      text,
       language: row.language && row.language !== 'other' ? row.language : null,
       model: job.model,
       device: this.settings.get().align.device,
       ytdlp: ytdlp.path,
       workDir,
+      /** offset: only the opening stretch of the video is decoded. */
+      maxSeconds: probe?.windowS ?? null,
       keepAudio: false,
     };
 
@@ -211,18 +278,54 @@ export class AlignService {
     });
 
     if (slot.cancelled) throw new Error('cancelled');
-    if (!result.ok || !result.enhancedLrc) throw new Error(result.error ?? 'worker returned no result');
-
-    job.warnings = result.warnings ?? [];
-    this.repo.upsertLyrics(videoId, 'aligned', 'synced_word', result.enhancedLrc, row.duration_s ?? undefined);
-    // Back to best-by-rank so the new word-synced document is what plays.
-    this.repo.setActiveSource(videoId, null);
+    if (!result.ok) throw new Error(result.error ?? 'worker returned no result');
     await fs.promises.rm(workDir, { recursive: true, force: true });
-    console.log(
-      `[align] ${videoId} stored word-synced lyrics in ${Math.round((Date.now() - t0) / 1000)} s` +
-        (job.warnings.length ? ` (warnings: ${job.warnings.join(' / ')})` : ''),
-    );
-    this.finish(job, 'done', `Word-synced lyrics ready (${job.model})`);
+    job.warnings = result.warnings ?? [];
+    const secs = Math.round((Date.now() - t0) / 1000);
+    const dur = row.duration_s ?? undefined;
+
+    if (job.kind === 'align') {
+      if (!result.enhancedLrc) throw new Error('worker returned no lyrics');
+      this.repo.upsertLyrics(videoId, 'aligned', 'synced_word', result.enhancedLrc, dur);
+      // Back to best-by-rank so the new word-synced document is what plays.
+      this.repo.setActiveSource(videoId, null);
+      console.log(`[align] ${videoId} stored word-synced lyrics in ${secs} s${warnNote(job)}`);
+      this.finish(job, 'done', `Word-synced lyrics ready (${job.model})`);
+    } else if (job.kind === 'transcribe') {
+      if (!result.enhancedLrc) throw new Error('worker returned no lyrics');
+      this.repo.upsertLyrics(videoId, 'transcribed', 'synced_word', result.enhancedLrc, dur);
+      // The user asked for this text explicitly: make it the active document
+      // (best-by-rank would put it below any real lyrics that exist).
+      this.repo.setActiveSource(videoId, 'transcribed');
+      this.repo.setLanguage(videoId, detectTrackLanguage(row.title ?? '', result.enhancedLrc));
+      console.log(`[align] ${videoId} stored transcription in ${secs} s${warnNote(job)}`);
+      this.finish(
+        job,
+        'done',
+        `Transcribed lyrics ready (${job.model}${result.language ? `, ${result.language}` : ''})`,
+      );
+    } else {
+      const heard = result.heard ?? [];
+      console.log(
+        `[align] ${videoId} heard: ${heard.map((h) => `${h.startS.toFixed(1)}s "${h.text}"`).join(' | ')}`,
+      );
+      const est = estimateOffset(probe!, heard, result.energyOnsetS ?? null);
+      if (!est) throw new Error(`No vocals found in the first ${probe!.windowS} s of the video`);
+      if (Math.abs(est.offsetMs) > MAX_PLAUSIBLE_OFFSET_MS) {
+        throw new Error(
+          `Implausible result (${formatOffset(est.offsetMs)}) — the lyrics may not match this video; offset not changed`,
+        );
+      }
+      if (est.note) job.warnings.push(est.note);
+      this.repo.setOffset(videoId, est.offsetMs);
+      job.offsetMs = est.offsetMs;
+      const how = est.linesUsed
+        ? `${est.linesUsed} of ${probe!.lineCount} lines recognised (spread ${(est.spreadMs / 1000).toFixed(1)} s` +
+          (est.outliers ? `, ${est.outliers} stray match ignored)` : ')')
+        : 'from the first vocal sound';
+      console.log(`[align] ${videoId} auto-offset ${formatOffset(est.offsetMs)} in ${secs} s, ${how}${warnNote(job)}`);
+      this.finish(job, 'done', `Offset ${formatOffset(est.offsetMs)} applied — ${how}`);
+    }
     this.onStored(videoId);
   }
 
@@ -262,6 +365,10 @@ export class AlignService {
       }, due);
     }
   }
+}
+
+function warnNote(job: AlignJob): string {
+  return job.warnings.length ? ` (warnings: ${job.warnings.join(' / ')})` : '';
 }
 
 function asStage(s: string | undefined): AlignStage {

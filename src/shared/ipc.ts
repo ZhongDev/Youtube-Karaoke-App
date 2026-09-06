@@ -4,6 +4,8 @@
 
 import type { Language } from './language';
 export type { Language } from './language';
+import type { RubyDoc } from './ruby';
+export type { RubyDoc, RubySegment } from './ruby';
 
 export interface AppInfo {
   appVersion: string;
@@ -76,7 +78,11 @@ export interface OllamaSettings {
 export type LyricsMode = 'twoTrack' | 'scroll';
 export const LYRICS_MODES: readonly LyricsMode[] = ['twoTrack', 'scroll'];
 
-/** Reading aid drawn above the native text (extraction lands in Phase 6). */
+/**
+ * Reading aid (Phase 6): furigana = kana over kanji, romaji = Hepburn over
+ * every Japanese word. Korean lyrics get Revised Romanization in either mode.
+ * Computed in main (kuromoji) per song and cached in the DB.
+ */
 export type RubyMode = 'none' | 'furigana' | 'romaji';
 export const RUBY_MODES: readonly RubyMode[] = ['none', 'furigana', 'romaji'];
 
@@ -220,15 +226,26 @@ export type AlignStage =
   | 'separate' // Demucs vocals
   | 'load' // Whisper model load (first use downloads it)
   | 'align' // stable-ts forced alignment
+  | 'transcribe' // stable-ts free transcription (no reference text)
   | 'done'
   | 'error'
   | 'cancelled';
 
+/**
+ * What a worker job produces (Phase 5 + 6):
+ *  - align: word-synced lyrics from known text → source 'aligned'
+ *  - transcribe: word-synced lyrics from the audio alone → source 'transcribed'
+ *  - offset: the intro-length difference → per-video offset
+ */
+export type AlignKind = 'align' | 'transcribe' | 'offset';
+export const ALIGN_KINDS: readonly AlignKind[] = ['align', 'transcribe', 'offset'];
+
 export interface AlignJob {
   videoId: string;
+  kind: AlignKind;
   /** Song label for status displays. */
   title: string;
-  /** Lyrics source whose text was the alignment reference. */
+  /** Lyrics source whose text was the reference ('' for transcription). */
   source: string;
   model: WhisperModel;
   stage: AlignStage;
@@ -236,6 +253,8 @@ export interface AlignJob {
   message: string;
   error: string | null;
   warnings: string[];
+  /** offset jobs: the offset that was applied, once done. */
+  offsetMs: number | null;
   startedAt: number;
   finishedAt: number | null;
 }
@@ -297,6 +316,7 @@ export const IPC = {
   lyricsSetManual: 'lyrics:set-manual',
   lyricsSetMeta: 'lyrics:set-meta',
   lyricsRefetch: 'lyrics:refetch',
+  rubyGet: 'lyrics:ruby',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   search: 'search:run',
@@ -376,6 +396,12 @@ export interface KaraokeApi {
   lyricsSetMeta(videoId: string, artist: string, track: string): Promise<ResolveResult>;
   /** Discard provider results and search again (metadata unchanged). */
   lyricsRefetch(videoId: string): Promise<ResolveResult>;
+  /**
+   * Reading aid for lyrics `source` of this video: per-line segments with
+   * furigana / romaji (ja) or Revised Romanization (ko). null when the
+   * track's language has no reading aid or the lyrics are not synced.
+   */
+  rubyGet(videoId: string, source: string, mode: RubyMode): Promise<RubyDoc | null>;
 
   settingsGet(): Promise<Settings>;
   settingsSet(patch: SettingsPatch): Promise<Settings>;
@@ -390,10 +416,13 @@ export interface KaraokeApi {
 
   // ── local alignment (background job; playback stays usable) ──
   /**
-   * Queue a forced-alignment job using the text of lyrics `source` as the
-   * reference. The result is stored as source 'aligned' (kind synced_word).
+   * Queue a worker job (one per video at a time):
+   *  - 'align': forced alignment of lyrics `source` → source 'aligned'
+   *  - 'transcribe': Whisper transcription of the vocals → source 'transcribed'
+   *  - 'offset': estimate the intro offset from the active synced lyrics
+   *    (`source` = which lyrics to probe; defaults to the active one)
    */
-  alignStart(videoId: string, source: string): Promise<AlignSnapshot>;
+  alignStart(videoId: string, kind: AlignKind, source?: string): Promise<AlignSnapshot>;
   alignCancel(videoId: string): Promise<AlignSnapshot>;
   alignGet(): Promise<AlignSnapshot>;
   onAlignChanged(cb: (s: AlignSnapshot) => void): () => void;

@@ -1,6 +1,7 @@
-import { useEffect, useState, type RefObject } from 'react';
-import type { LyricsDoc, LyricsMode, RubyMode } from '../../shared/ipc';
+import { Fragment, useEffect, useState, type RefObject } from 'react';
+import type { LyricsDoc, LyricsMode, RubyDoc } from '../../shared/ipc';
 import { lineIndexAt, type ParsedLrc } from '../../shared/lrc';
+import { readingLine } from '../../shared/ruby';
 import type { SyncClock } from '../../shared/syncClock';
 import TwoTrackLyrics from './TwoTrackLyrics';
 
@@ -15,11 +16,12 @@ interface Props {
   offsetMsRef: RefObject<number>;
   /** Synced-lyrics renderer (settings → display.lyricsMode). */
   mode: LyricsMode;
-  ruby: RubyMode;
+  /** Reading aid for `parsed` (index-aligned), when the setting and language call for one. */
+  rubyDoc: RubyDoc | null;
 }
 
 export default function LyricsDisplay(props: Props) {
-  const { status, doc, parsed, clock, offsetMsRef, mode, ruby } = props;
+  const { status, doc, parsed, clock, offsetMsRef, mode, rubyDoc } = props;
   if (status === 'fetching') {
     return <div className="lyrics-note">Fetching lyrics…</div>;
   }
@@ -28,7 +30,9 @@ export default function LyricsDisplay(props: Props) {
   }
   if (status !== 'done' || !doc) {
     return status === 'done' ? (
-      <div className="lyrics-note">No lyrics found for this video.</div>
+      <div className="lyrics-note">
+        No lyrics found for this video — press i to paste some, or transcribe them from the audio.
+      </div>
     ) : null;
   }
   if (!parsed) {
@@ -41,19 +45,28 @@ export default function LyricsDisplay(props: Props) {
     );
   }
   if (mode === 'twoTrack') {
-    return <TwoTrackLyrics parsed={parsed} clock={clock} offsetMsRef={offsetMsRef} ruby={ruby} />;
+    return (
+      <TwoTrackLyrics
+        parsed={parsed}
+        clock={clock}
+        offsetMsRef={offsetMsRef}
+        rubyLines={rubyDoc?.lines ?? null}
+      />
+    );
   }
-  return <SyncedLyrics parsed={parsed} clock={clock} offsetMsRef={offsetMsRef} />;
+  return <SyncedLyrics parsed={parsed} clock={clock} offsetMsRef={offsetMsRef} rubyDoc={rubyDoc} />;
 }
 
 function SyncedLyrics({
   parsed,
   clock,
   offsetMsRef,
+  rubyDoc,
 }: {
   parsed: ParsedLrc;
   clock: SyncClock;
   offsetMsRef: RefObject<number>;
+  rubyDoc: RubyDoc | null;
 }) {
   const [lineIdx, setLineIdx] = useState(-1);
   const [wordIdx, setWordIdx] = useState(-1);
@@ -106,20 +119,32 @@ function SyncedLyrics({
     }
   }
 
+  // Reading aid as one sub-line under the current line (SPEC.md §7): romaji
+  // / romanization spaced per word, furigana as a continuous kana reading.
+  const segs = current && rubyDoc ? rubyDoc.lines[lineIdx] : undefined;
+  const sub = segs ? readingLine(segs, !(rubyDoc!.lang === 'ja' && rubyDoc!.mode === 'furigana')) : '';
+
   return (
     <div className="lyrics-synced">
       {window.map((w) =>
-        w.role === 'current' && current?.words ? (
-          <div key={w.key} className="lyric-line current">
-            {current.words.map((word, i) => (
-              <span key={i} className={i <= wordIdx ? 'word sung' : 'word'}>
-                {word.text}
-              </span>
-            ))}
-          </div>
+        w.role === 'current' ? (
+          <Fragment key={w.key}>
+            {current?.words ? (
+              <div className="lyric-line current">
+                {current.words.map((word, i) => (
+                  <span key={i} className={i <= wordIdx ? 'word sung' : 'word'}>
+                    {word.text}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="lyric-line current">{w.text || ' '}</div>
+            )}
+            {sub && <div className="lyric-sub">{sub}</div>}
+          </Fragment>
         ) : (
           <div key={w.key} className={`lyric-line ${w.role}`}>
-            {w.text || ' '}
+            {w.text || ' '}
           </div>
         ),
       )}

@@ -1,9 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import type { RubyMode } from '../../shared/ipc';
 import type { ParsedLrc } from '../../shared/lrc';
+import type { RubySegment } from '../../shared/ruby';
 import type { SyncClock } from '../../shared/syncClock';
 import { laneStateAt, scheduleTwoTrack, wipeProgress } from '../../shared/twoTrack';
-import { annotate, type RubySegment } from '../ruby';
 
 // Joysound-style two-lane display (see shared/twoTrack.ts for the timing
 // model). Per frame we read the clock, ask the schedule what each lane shows,
@@ -53,12 +52,13 @@ interface Props {
   parsed: ParsedLrc;
   clock: SyncClock;
   offsetMsRef: RefObject<number>;
-  ruby: RubyMode;
+  /** Reading-aid segments per line (same index as parsed.lines), or null for none. */
+  rubyLines: RubySegment[][] | null;
 }
 
 type Slots = [number | null, number | null];
 
-export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Props) {
+export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, rubyLines }: Props) {
   const schedule = useMemo(() => scheduleTwoTrack(parsed.lines), [parsed]);
   const [slots, setSlots] = useState<Slots>([null, null]);
   const lineEls = useRef<[HTMLDivElement | null, HTMLDivElement | null]>([null, null]);
@@ -101,7 +101,8 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
   }, [schedule, parsed, clock, offsetMsRef]);
 
   // Text never resizes while shown, but an over-long line is shrunk once,
-  // before its first frame, so it fits the lane on one row.
+  // before its first frame, so it fits the lane on one row. (Ruby arriving
+  // late re-measures: readings can widen a line.)
   useLayoutEffect(() => {
     for (const lane of [0, 1] as const) {
       const el = lineEls.current[lane];
@@ -114,13 +115,14 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
         el.style.fontSize = `${Math.max(base * 0.45, base * (room / need) * 0.98)}px`;
       }
     }
-  }, [slots]);
+  }, [slots, rubyLines]);
 
   return (
-    <div className={`twotrack ${ruby !== 'none' ? 'has-ruby' : ''}`}>
+    <div className={`twotrack ${rubyLines ? 'has-ruby' : ''}`}>
       {([0, 1] as const).map((lane) => {
         const idx = slots[lane];
         const line = idx === null ? undefined : parsed.lines[idx];
+        const segments = (idx !== null && rubyLines?.[idx]) || (line ? [{ base: line.text }] : []);
         return (
           <div key={lane} className="tt-lane">
             {line && idx !== null && (
@@ -139,7 +141,7 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
                     baseEls.current[lane] = el;
                   }}
                 >
-                  <Segments segments={annotate(line.text, ruby)} />
+                  <Segments segments={segments} />
                 </span>
                 <span
                   className="tt-text hl"
@@ -148,7 +150,7 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
                     hlEls.current[lane] = el;
                   }}
                 >
-                  <Segments segments={annotate(line.text, ruby)} />
+                  <Segments segments={segments} />
                 </span>
               </div>
             )}
@@ -159,15 +161,16 @@ export default function TwoTrackLyrics({ parsed, clock, offsetMsRef, ruby }: Pro
   );
 }
 
+/** Real <ruby> markup: the browser centres the reading and widens the base when the reading is wider. */
 function Segments({ segments }: { segments: RubySegment[] }) {
   return (
     <>
       {segments.map((s, i) =>
         s.ruby ? (
-          <span key={i} className="tt-seg">
-            <span className="tt-ruby">{s.ruby}</span>
+          <ruby key={i}>
             {s.base}
-          </span>
+            <rt>{s.ruby}</rt>
+          </ruby>
         ) : (
           <span key={i}>{s.base}</span>
         ),

@@ -2,12 +2,14 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import type Database from 'better-sqlite3';
 import {
   ALIGN_DEVICES,
+  ALIGN_KINDS,
   IPC,
   LYRICS_MODES,
   PROVIDER_IDS,
   RUBY_MODES,
   WHISPER_MODELS,
   type AlignDevice,
+  type AlignKind,
   type AlignSnapshot,
   type AppInfo,
   type DisplayInfo,
@@ -15,6 +17,7 @@ import {
   type QueueAddMode,
   type QueueSnapshot,
   type ResolveResult,
+  type RubyDoc,
   type RubyMode,
   type SearchResult,
   type Settings,
@@ -30,6 +33,7 @@ import { schemaVersion } from './db';
 import { LyricsService } from './lyricsService';
 import { QueueService } from './queueService';
 import { Repo } from './repo';
+import { RubyService } from './rubyService';
 import { SettingsStore } from './settings';
 import { TopicSuggester } from './topicSuggest';
 import { Uv } from './uv';
@@ -124,6 +128,7 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
   const repo = new Repo(db);
   const settings = new SettingsStore(db);
   const lyrics = new LyricsService(repo, settings);
+  const ruby = new RubyService(repo);
   const queue = new QueueService(repo, lyrics, (snapshot: QueueSnapshot) =>
     broadcast(IPC.queueChanged, snapshot),
   );
@@ -253,6 +258,16 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
     return r;
   });
 
+  ipcMain.handle(
+    IPC.rubyGet,
+    (_e, videoId: unknown, source: unknown, mode: unknown): Promise<RubyDoc | null> => {
+      const id = assertVideoId(videoId);
+      const src = assertText(source, 'source', 64);
+      if (!(RUBY_MODES as readonly unknown[]).includes(mode)) throw new Error('Invalid ruby mode');
+      return ruby.annotate(id, src, mode as RubyMode);
+    },
+  );
+
   // ── settings ──
   ipcMain.handle(IPC.settingsGet, (): Settings => settings.get());
 
@@ -279,9 +294,15 @@ export function registerIpcHandlers(db: Database.Database, dbPath: string): void
   ipcMain.handle(IPC.searchInstall, (): Promise<YtDlpStatus> => ytdlp.install());
 
   // ── local alignment ──
-  ipcMain.handle(IPC.alignStart, (_e, videoId: unknown, source: unknown): AlignSnapshot => {
-    return align.start(assertVideoId(videoId), assertText(source, 'source', 64));
-  });
+  ipcMain.handle(
+    IPC.alignStart,
+    (_e, videoId: unknown, kind: unknown, source: unknown): AlignSnapshot => {
+      const id = assertVideoId(videoId);
+      if (!(ALIGN_KINDS as readonly unknown[]).includes(kind)) throw new Error('Invalid job kind');
+      const src = source === undefined || source === null ? null : assertText(source, 'source', 64);
+      return align.start(id, kind as AlignKind, src);
+    },
+  );
 
   ipcMain.handle(IPC.alignCancel, (_e, videoId: unknown): AlignSnapshot => {
     return align.cancel(assertVideoId(videoId));

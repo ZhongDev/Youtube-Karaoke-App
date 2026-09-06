@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   WHISPER_MODELS,
   type AlignJob,
+  type AlignKind,
   type LyricsDoc,
   type LyricsKind,
   type ResolveResult,
@@ -11,14 +12,13 @@ import {
   type WhisperModel,
 } from '../../shared/ipc';
 import { ipcErrorMessage } from '../ipcError';
-import { STAGE_LABEL, isAlignActive, overallPercent } from '../useAlign';
+import { KIND_LABEL, STAGE_LABEL, isAlignActive, overallPercent } from '../useAlign';
 import type { LyricsStatus } from './LyricsDisplay';
 
 // Lyrics inspector modal (SPEC.md §7): raw LRC view, switch the active
 // source, paste manual lyrics/LRC, edit artist/track (→ re-fetch), re-fetch,
-// and (Phase 5) "Align lyrics" — a background job that turns any stored text
-// into word-synced lyrics. Every mutation returns a fresh ResolveResult
-// which the App adopts.
+// and the local worker jobs (Phases 5–6): align, transcribe, auto-offset.
+// Every mutation returns a fresh ResolveResult which the App adopts.
 
 interface Props {
   videoId: string;
@@ -40,7 +40,7 @@ const MODEL_HINT: Record<WhisperModel, string> = {
   small: 'rough · ~0.5 GB · fastest',
 };
 
-const KIND_LABEL: Record<LyricsKind, string> = {
+const KIND_LABEL_DOC: Record<LyricsKind, string> = {
   synced_word: 'word-synced',
   synced_line: 'line-synced',
   plain: 'plain',
@@ -229,7 +229,7 @@ export default function LyricsInspector(props: Props) {
                       }
                     />
                     <span className="source-name">{d.source}</span>
-                    <span className={`qbadge qbadge-${d.kind}`}>{KIND_LABEL[d.kind]}</span>
+                    <span className={`qbadge qbadge-${d.kind}`}>{KIND_LABEL_DOC[d.kind]}</span>
                     {d.providerDurationS !== null && (
                       <span className="muted">{d.providerDurationS}s</span>
                     )}
@@ -252,15 +252,16 @@ export default function LyricsInspector(props: Props) {
         {viewingDoc && (
           <section className="insp-raw">
             <h3>
-              Raw · {viewingDoc.source} · {KIND_LABEL[viewingDoc.kind]}
+              Raw · {viewingDoc.source} · {KIND_LABEL_DOC[viewingDoc.kind]}
             </h3>
             <pre className="raw-lrc">{viewingDoc.body}</pre>
           </section>
         )}
 
-        <AlignSection
+        <JobsSection
           videoId={videoId}
           sources={sources}
+          activeDoc={active}
           defaultSource={viewingDoc?.source ?? active?.source ?? null}
           job={job}
           settings={settings}
@@ -312,13 +313,15 @@ export default function LyricsInspector(props: Props) {
 }
 
 /**
- * "Align lyrics" (SPEC.md §5 Tier 3): pick the reference text + Whisper
- * model, start the background job, watch its progress, cancel. The result
- * lands as source "aligned" and the App re-resolves the song by itself.
+ * Local worker jobs (SPEC.md §5 Tier 3 + Phase 6): align known text, transcribe
+ * the vocals when no lyrics exist anywhere, or estimate the intro offset. One
+ * job per video at a time; the result lands in the DB and the App re-resolves
+ * the song by itself.
  */
-function AlignSection({
+function JobsSection({
   videoId,
   sources,
+  activeDoc,
   defaultSource,
   job,
   settings,
@@ -327,15 +330,19 @@ function AlignSection({
 }: {
   videoId: string;
   sources: LyricsDoc[];
+  activeDoc: LyricsDoc | null;
   defaultSource: string | null;
   job: AlignJob | null;
   settings: Settings;
   onSaveSettings(patch: SettingsPatch): Promise<Settings>;
   disabled: boolean;
 }) {
-  const candidates = sources.filter((d) => d.source !== 'aligned');
+  // Worker output is never a reference: aligning to it would only echo it.
+  const candidates = sources.filter((d) => d.source !== 'aligned' && d.source !== 'transcribed');
   const [source, setSource] = useState<string>(
-    defaultSource && defaultSource !== 'aligned' ? defaultSource : (candidates[0]?.source ?? ''),
+    defaultSource && candidates.some((d) => d.source === defaultSource)
+      ? defaultSource
+      : (candidates[0]?.source ?? ''),
   );
   const [uv, setUv] = useState<UvStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -349,39 +356,50 @@ function AlignSection({
     if (!candidates.some((d) => d.source === source)) setSource(candidates[0]?.source ?? '');
   }, [candidates, source]);
 
-  const start = () => {
+  const start = (kind: AlignKind, src?: string) => {
     setError(null);
-    window.karaoke.alignStart(videoId, source).catch((err: unknown) => setError(ipcErrorMessage(err)));
+    window.karaoke
+      .alignStart(videoId, kind, src)
+      .catch((err: unknown) => setError(ipcErrorMessage(err)));
   };
 
   const ready = uv?.available && uv.envReady;
+  const syncedActive = activeDoc !== null && activeDoc.kind !== 'plain';
+  const busy = disabled || active;
 
   return (
     <section className="insp-align">
-      <h3>Align lyrics locally</h3>
+      <h3>Local audio jobs (Whisper)</h3>
       <p className="muted">
-        Generates word-synced lyrics on this Mac: the audio is fetched with yt-dlp, the vocals
-        isolated with Demucs, then Whisper (stable-ts) aligns the chosen text to them. Runs in
-        the background — playback keeps working.
+        Each fetches the audio with yt-dlp and isolates the vocals with Demucs on this Mac, then
+        runs Whisper (stable-ts). One job per video at a time, in the background — playback keeps
+        working.
       </p>
       {uv && !ready && !active && (
         <p className="warning-chip align-note">
           {!uv.available
-            ? '⚠ uv is not set up — Settings → Local alignment (one-click download).'
-            : '⚠ The Python environment is not prepared yet — the first job sets it up (~600 MB) before starting, or use Settings → Local alignment.'}
+            ? '⚠ uv is not set up — Settings → Local audio jobs (one-click download).'
+            : '⚠ The Python environment is not prepared yet — the first job sets it up (~600 MB) before starting, or use Settings → Local audio jobs.'}
         </p>
       )}
-      <div className="insp-actions align-controls">
+
+      <div className="job-row">
+        <div className="job-text">
+          <b>Align lyrics</b>
+          <span className="muted">
+            Word-syncs the chosen text (plain or line-synced) → source “aligned”.
+          </span>
+        </div>
         <label className="field compact">
           <span>Reference text</span>
           <select
             value={source}
-            disabled={disabled || active || !candidates.length}
+            disabled={busy || !candidates.length}
             onChange={(e) => setSource(e.target.value)}
           >
             {candidates.map((d) => (
               <option key={d.source} value={d.source}>
-                {d.source} · {KIND_LABEL[d.kind]}
+                {d.source} · {KIND_LABEL_DOC[d.kind]}
               </option>
             ))}
           </select>
@@ -400,30 +418,66 @@ function AlignSection({
             ))}
           </select>
         </label>
-        {!active && (
-          <button
-            className="url-load"
-            type="button"
-            disabled={disabled || !source || !candidates.length}
-            onClick={start}
-          >
-            {job?.stage === 'done' ? 'Align again' : 'Align lyrics'}
-          </button>
-        )}
-        {active && (
+        <button
+          className="url-load"
+          type="button"
+          disabled={busy || !source || !candidates.length}
+          onClick={() => start('align', source)}
+        >
+          {job?.kind === 'align' && job.stage === 'done' ? 'Align again' : 'Align lyrics'}
+        </button>
+      </div>
+
+      <div className="job-row">
+        <div className="job-text">
+          <b>Transcribe from audio</b>
+          <span className="muted">
+            No lyrics anywhere? Whisper writes them from the vocals — word-synced but unedited →
+            source “transcribed”, made active.
+          </span>
+        </div>
+        <button className="url-load" type="button" disabled={busy} onClick={() => start('transcribe')}>
+          {job?.kind === 'transcribe' && job.stage === 'done' ? 'Transcribe again' : 'Transcribe'}
+        </button>
+      </div>
+
+      <div className="job-row">
+        <div className="job-text">
+          <b>Auto-offset</b>
+          <span className="muted">
+            Listens to the opening ~1½ minutes of this video, finds the first lines of the active
+            lyrics{activeDoc ? ` (${activeDoc.source})` : ''} in what it hears, and sets the
+            per-video offset to the difference (the intro length).
+            {!syncedActive && ' Needs time-synced lyrics.'}
+          </span>
+        </div>
+        <button
+          className="url-load"
+          type="button"
+          disabled={busy || !syncedActive}
+          onClick={() => start('offset', activeDoc?.source)}
+        >
+          Estimate offset
+        </button>
+      </div>
+
+      {active && (
+        <div className="insp-actions">
           <button
             className="qbtn danger"
             type="button"
             onClick={() => void window.karaoke.alignCancel(videoId)}
           >
-            Cancel
+            Cancel {KIND_LABEL[job.kind].toLowerCase()}
           </button>
-        )}
-      </div>
+        </div>
+      )}
       {job && (
         <div className={`align-status align-${job.stage}`}>
           <div className="align-line">
-            <span className="align-stage">{STAGE_LABEL[job.stage]}</span>
+            <span className="align-stage">
+              {KIND_LABEL[job.kind]} · {STAGE_LABEL[job.stage]}
+            </span>
             <span className="muted align-msg">{job.message}</span>
             {active && <span className="align-pct">{overallPercent(job)}%</span>}
           </div>
@@ -432,10 +486,16 @@ function AlignSection({
               <i style={{ width: `${overallPercent(job)}%` }} />
             </div>
           )}
-          {job.stage === 'done' && (
+          {job.stage === 'done' && job.kind === 'align' && (
             <div className="muted">
               Stored as source “aligned” (word-synced) from {job.source} with {job.model}; it is
               now the active lyrics.
+            </div>
+          )}
+          {job.stage === 'done' && job.kind === 'transcribe' && (
+            <div className="muted">
+              Stored as source “transcribed” (word-synced, {job.model}) and pinned as the active
+              lyrics — switch back to “auto” above if real lyrics turn up.
             </div>
           )}
           {job.warnings.length > 0 && (

@@ -153,8 +153,10 @@ export default function SettingsModal({ appInfo, settings, onSave, onClose }: Pr
             ))}
           </div>
           <p className="muted">
-            Furigana / romaji extraction is Phase 6 work — the two-track display is wired
-            for it but shows nothing above the text until then.
+            Furigana puts the kana reading over each kanji; Romaji puts a Hepburn reading over
+            every Japanese word. Korean lyrics get Revised Romanization in either mode; other
+            languages show nothing. In the scroll display the reading is a sub-line under the
+            current line. Computed once per song with kuromoji and cached.
           </p>
         </section>
 
@@ -376,12 +378,12 @@ function AlignSettingsSection({
 
   return (
     <section>
-      <h3>Local alignment (Phase 5)</h3>
+      <h3>Local audio jobs (Whisper)</h3>
       <p className="muted">
-        “Align lyrics” in the lyrics inspector builds word-synced lyrics on this Mac with a
-        Python worker: yt-dlp audio → Demucs vocals → Whisper forced alignment. The worker’s
-        Python and packages are managed by <b>uv</b> in the app’s data folder; Whisper model
-        weights download into ~/.cache/whisper on first use.
+        The lyrics inspector’s “Align lyrics”, “Transcribe from audio” and “Auto-offset” run a
+        Python worker on this Mac: yt-dlp audio → Demucs vocals → Whisper (stable-ts). The
+        worker’s Python and packages are managed by <b>uv</b> in the app’s data folder; Whisper
+        model weights download into ~/.cache/whisper on first use.
       </p>
       <div className={`ytdlp-status ${status && !status.available ? 'bad' : ''}`}>
         <span>{uvLine}</span>

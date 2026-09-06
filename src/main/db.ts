@@ -66,6 +66,18 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tracks ADD COLUMN active_source TEXT;
   ALTER TABLE tracks ADD COLUMN meta_source TEXT;
   `,
+  // v5 — Phase 6: cached reading aids (furigana / romaji / romanization),
+  // keyed by a hash of language + lyrics body so a changed document simply
+  // misses (stale rows are harmless).
+  `
+  CREATE TABLE ruby_cache (
+    hash       TEXT NOT NULL,   -- sha1 of language + body
+    mode       TEXT NOT NULL,   -- 'furigana' | 'romaji'
+    data       TEXT NOT NULL,   -- JSON RubySegment[][] (one entry per LRC line)
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (hash, mode)
+  );
+  `,
 ];
 
 export function getDbPath(): string {

@@ -41,6 +41,7 @@ const api: KaraokeApi = {
   lyricsSetMeta: (videoId, artist, track) =>
     ipcRenderer.invoke(IPC.lyricsSetMeta, videoId, artist, track),
   lyricsRefetch: (videoId) => ipcRenderer.invoke(IPC.lyricsRefetch, videoId),
+  rubyGet: (videoId, source, mode) => ipcRenderer.invoke(IPC.rubyGet, videoId, source, mode),
 
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(IPC.settingsSet, patch),
@@ -50,7 +51,8 @@ const api: KaraokeApi = {
   searchInstall: () => ipcRenderer.invoke(IPC.searchInstall),
   onInstallProgress: (cb) => on<InstallProgress>(IPC.searchInstallProgress, cb),
 
-  alignStart: (videoId, source) => ipcRenderer.invoke(IPC.alignStart, videoId, source),
+  alignStart: (videoId, kind, source) =>
+    ipcRenderer.invoke(IPC.alignStart, videoId, kind, source),
   alignCancel: (videoId) => ipcRenderer.invoke(IPC.alignCancel, videoId),
   alignGet: () => ipcRenderer.invoke(IPC.alignGet),
   onAlignChanged: (cb) => on<AlignSnapshot>(IPC.alignChanged, cb),

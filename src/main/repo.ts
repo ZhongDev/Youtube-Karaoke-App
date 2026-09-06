@@ -44,8 +44,19 @@ const KIND_RANK: Record<LyricsKind, number> = {
   plain: 1,
 };
 
+/**
+ * A raw Whisper transcription is word-synced but its words are guesses, so
+ * it ranks below everything with real text (even plain); it only wins
+ * automatically when it is all there is. Mirrored in listQueue's SQL.
+ */
+const TRANSCRIBED_PENALTY = 2.5;
+
+function docRank(d: LyricsDoc): number {
+  return KIND_RANK[d.kind] - (d.source === 'transcribed' ? TRANSCRIBED_PENALTY : 0);
+}
+
 /** Sources that are never discarded by a provider re-fetch. */
-const USER_SOURCES = ['manual', 'aligned'] as const;
+const USER_SOURCES = ['manual', 'aligned', 'transcribed'] as const;
 
 const META_SOURCES: readonly MetaSource[] = ['parsed', 'ollama', 'user'];
 
@@ -68,9 +79,7 @@ export function toTrackInfo(r: TrackRow): TrackInfo {
 
 /** Rank-descending, then by source name — a stable order for the inspector. */
 export function sortLyricsDocs(docs: LyricsDoc[]): LyricsDoc[] {
-  return [...docs].sort(
-    (a, b) => KIND_RANK[b.kind] - KIND_RANK[a.kind] || a.source.localeCompare(b.source),
-  );
+  return [...docs].sort((a, b) => docRank(b) - docRank(a) || a.source.localeCompare(b.source));
 }
 
 export class Repo {
@@ -235,6 +244,24 @@ export class Repo {
       .run(videoId, Math.round(offsetMs));
   }
 
+  // ── reading-aid cache (Phase 6) ──
+
+  getRuby(hash: string, mode: string): string | null {
+    const row = this.db
+      .prepare('SELECT data FROM ruby_cache WHERE hash = ? AND mode = ?')
+      .get(hash, mode) as { data: string } | undefined;
+    return row?.data ?? null;
+  }
+
+  putRuby(hash: string, mode: string, data: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO ruby_cache (hash, mode, data) VALUES (?, ?, ?)
+         ON CONFLICT(hash, mode) DO UPDATE SET data = excluded.data`,
+      )
+      .run(hash, mode, data);
+  }
+
   // ── queue ──────────────────────────────────────────────────
 
   listQueue(): QueueRow[] {
@@ -246,8 +273,9 @@ export class Repo {
                   (SELECT l.kind FROM lyrics l
                    WHERE l.video_id = q.video_id AND l.source = t.active_source),
                   (SELECT l.kind FROM lyrics l WHERE l.video_id = q.video_id
-                   ORDER BY CASE l.kind WHEN 'synced_word' THEN 3
-                                        WHEN 'synced_line' THEN 2 ELSE 1 END DESC
+                   ORDER BY (CASE l.kind WHEN 'synced_word' THEN 3
+                                         WHEN 'synced_line' THEN 2 ELSE 1 END)
+                            - (CASE WHEN l.source = 'transcribed' THEN 2.5 ELSE 0 END) DESC
                    LIMIT 1)) AS best_kind
          FROM queue q LEFT JOIN tracks t ON t.video_id = q.video_id
          ORDER BY q.position`,

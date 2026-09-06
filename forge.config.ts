@@ -11,9 +11,10 @@ import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 
 // Vite bundles all JS, so the Vite plugin packages the app without node_modules.
-// Native modules (better-sqlite3) stay external and must be copied in by hand,
-// along with their runtime dependency closure.
-const EXTERNAL_NATIVE_PACKAGES = ['better-sqlite3'];
+// Packages kept external (vite.main.config.ts) must be copied in by hand,
+// along with their runtime dependency closure: the native better-sqlite3,
+// and kuromoji, whose dictionary files live beside its code.
+const EXTERNAL_PACKAGES = ['better-sqlite3', 'kuromoji'];
 
 function collectProdDeps(name: string, fromDir: string, out: Map<string, string>): void {
   if (out.has(name)) return;
@@ -39,7 +40,7 @@ const config: ForgeConfig = {
   hooks: {
     packageAfterPrune: async (_forgeConfig, buildPath) => {
       const deps = new Map<string, string>();
-      for (const name of EXTERNAL_NATIVE_PACKAGES) {
+      for (const name of EXTERNAL_PACKAGES) {
         collectProdDeps(name, __dirname, deps);
       }
       for (const [name, srcDir] of deps) {

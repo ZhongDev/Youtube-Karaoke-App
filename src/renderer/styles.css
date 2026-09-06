@@ -248,6 +248,17 @@ body {
   color: var(--accent);
 }
 
+/* scroll display: reading aid under the current line */
+.lyric-sub {
+  font-size: 20px;
+  line-height: 1.2;
+  color: var(--accent);
+  opacity: 0.9;
+  margin-top: -2px;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+  white-space: pre-wrap;
+}
+
 .lyrics-note {
   text-align: center;
   color: var(--text-dim);
@@ -851,22 +862,19 @@ body {
   clip-path: inset(0 100% 0 0);
 }
 
-.tt-seg {
-  display: inline-block;
-  position: relative;
+/* Reading aid (Phase 6): real ruby markup — the browser centres the reading
+   and widens the base when the reading is wider, in both layers alike. */
+.tt-line ruby {
+  ruby-position: over;
+  ruby-align: center;
 }
 
-.tt-ruby {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  right: 0;
-  text-align: center;
+.tt-line rt {
   font-size: 0.42em;
   line-height: 1;
   font-weight: 700;
-  white-space: nowrap;
-  -webkit-text-stroke: 0.08em;
+  letter-spacing: 0;
+  -webkit-text-stroke-width: 0.08em;
 }
 
 /* settings: radio rows */
@@ -1316,6 +1324,24 @@ body.cursor-hidden * {
   list-style: none;
   color: #ffb04d;
   font-size: 12px;
+}
+
+/* inspector: one row per local job */
+.job-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.job-text {
+  flex: 1 1 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
 }
 
 .align-chip {
